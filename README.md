@@ -1,7 +1,7 @@
 # Altitude — a vertical idea ladder over memory
 
 Altitude (formerly **Magpie**) is a thematic lens over
-[Raven](https://github.com/DigiBugCat), an epistemological memory system with
+[Raven](https://github.com/digibugcat/raven), an epistemological memory system with
 a derivation DAG and confidence scoring. It is not another memory store and
 not an autonomous idea blender. You seed a question or contribute a
 conversation; Altitude preserves the speech act (question, decision,
