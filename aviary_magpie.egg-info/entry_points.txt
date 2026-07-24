@@ -1,0 +1,3 @@
+[console_scripts]
+magpie = magpie.cli:main
+magpie-server = magpie.server:main

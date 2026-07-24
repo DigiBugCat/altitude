@@ -1,0 +1,4 @@
+aviary-mcp==0.1.0rc6
+
+[dev]
+pytest>=8

@@ -1,0 +1,76 @@
+# Disposable N-instance fleet for stress and quality evaluation.
+#
+# Each instance is a fully independent Magpie: its own SQLite state volume, its
+# own Raven tenant, and its own inference backend. Instances share the Raven
+# Postgres server but never a tenant, so idea concentration and novelty measured
+# in one field cannot leak from another.
+#
+# This is NOT the durable deployment. `docker compose -f compose.fleet.yml down
+# -v` is expected to destroy everything it created.
+name: magpie-fleet
+
+x-magpie: &magpie
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: "no"
+  environment: &magpie-env
+    MAGPIE_ACCESS: public
+    MAGPIE_PROVIDERS: configured
+    MAGPIE_RAVEN_URL: http://raven-api:3005/mcp
+  healthcheck:
+    test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:7351/birdz >/dev/null || exit 1"]
+    interval: 5s
+    timeout: 3s
+    retries: 12
+    start_period: 15s
+
+services:
+  instance-1:
+    <<: *magpie
+    environment:
+      <<: *magpie-env
+      MAGPIE_LLM_BASE_URL: ${FLEET_1_BASE_URL:?set by scripts/fleet-stress}
+      MAGPIE_LLM_API_KEY: ${FLEET_1_API_KEY:?set by scripts/fleet-stress}
+      MAGPIE_LLM_MODEL: ${FLEET_1_MODEL:?set by scripts/fleet-stress}
+      MAGPIE_RAVEN_AGENT_ID: fleet-1
+    volumes:
+      - fleet-1:/var/lib/magpie
+    ports:
+      - "127.0.0.1:${FLEET_1_PORT:-7461}:7351"
+
+  instance-2:
+    <<: *magpie
+    environment:
+      <<: *magpie-env
+      MAGPIE_LLM_BASE_URL: ${FLEET_2_BASE_URL:?set by scripts/fleet-stress}
+      MAGPIE_LLM_API_KEY: ${FLEET_2_API_KEY:?set by scripts/fleet-stress}
+      MAGPIE_LLM_MODEL: ${FLEET_2_MODEL:?set by scripts/fleet-stress}
+      MAGPIE_RAVEN_AGENT_ID: fleet-2
+    volumes:
+      - fleet-2:/var/lib/magpie
+    ports:
+      - "127.0.0.1:${FLEET_2_PORT:-7462}:7351"
+
+  instance-3:
+    <<: *magpie
+    environment:
+      <<: *magpie-env
+      MAGPIE_LLM_BASE_URL: ${FLEET_3_BASE_URL:?set by scripts/fleet-stress}
+      MAGPIE_LLM_API_KEY: ${FLEET_3_API_KEY:?set by scripts/fleet-stress}
+      MAGPIE_LLM_MODEL: ${FLEET_3_MODEL:?set by scripts/fleet-stress}
+      MAGPIE_RAVEN_AGENT_ID: fleet-3
+    volumes:
+      - fleet-3:/var/lib/magpie
+    ports:
+      - "127.0.0.1:${FLEET_3_PORT:-7463}:7351"
+
+volumes:
+  fleet-1:
+  fleet-2:
+  fleet-3:
+
+networks:
+  default:
+    name: raven-magpie_default
+    external: true

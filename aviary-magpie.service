@@ -1,0 +1,17 @@
+[Unit]
+Description=aviary bird: magpie - persistent thought field and MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/aviary/birds/magpie
+ExecStart=%h/aviary/birds/magpie/.venv/bin/python -m magpie.server
+Restart=on-failure
+RestartSec=3
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+Environment=MAGPIE_RUNTIME_DIR=%h/aviary/runtime/magpie
+EnvironmentFile=-%h/.config/aviary/magpie.env
+
+[Install]
+WantedBy=default.target

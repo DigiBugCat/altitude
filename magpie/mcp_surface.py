@@ -24,9 +24,11 @@ GUIDE = """\
 Magpie is a persistent field for developing thoughts, not an authority that
 settles truth automatically. Choose a workspace explicitly for every field
 operation. Use contribute for raw speech or notes; it queues asynchronous
-atomization, so poll get_field to observe resulting cards. collide and organize
-change the field. recall_workspace searches the private Raven memory graph
-through Magpie; adopt_memory imports one suggestion as an open local card.
+atomization, so poll get_field to observe resulting cards. Use
+get_conversation_map for the compact digest of themes, recurring ideas, typed
+follow-ups, and sparse connections. collide and organize change the field.
+recall_workspace searches the private Raven memory graph through Magpie;
+adopt_memory imports one suggestion as an open local card.
 Only the human-facing browser may judge, dismiss, or create a verification
 receipt; those operations are intentionally absent from MCP.
 """
@@ -110,6 +112,33 @@ def _state_for(workspace_id: str) -> dict[str, Any]:
         state["providers"] = server._provider_status()
         state["memory_shelf"] = server._memory_state(workspace_id)
         return state
+
+
+_DIGEST_LIST_KEYS = (
+    "themes",
+    "recurring_ideas",
+    "open_questions",
+    "decisions",
+    "constraints",
+    "experiments",
+    "tasks",
+    "between_ideas",
+)
+
+
+def _conversation_map(workspace_id: str) -> dict[str, Any]:
+    """Return the additive conversation digest without exposing full field state."""
+
+    state = _state_for(workspace_id)
+    raw_digest = state.get("digest")
+    digest = dict(raw_digest) if isinstance(raw_digest, dict) else {}
+    for key in _DIGEST_LIST_KEYS:
+        if not isinstance(digest.get(key), list):
+            digest[key] = []
+    # Connections are deliberately a sparse secondary surface. Enforce that
+    # contract at the agent boundary even while the internal digest evolves.
+    digest["between_ideas"] = digest["between_ideas"][:3]
+    return {"workspace_id": workspace_id, "digest": digest}
 
 
 def _create_workspace(name: str, question: str = "") -> dict[str, Any]:
@@ -346,6 +375,11 @@ def register_tools(mcp: Any) -> None:
     def get_field(workspace_id: str) -> dict[str, Any]:
         """Read one workspace's field without changing any active workspace."""
         return _state_for(workspace_id)
+
+    @mcp.tool(annotations=READ_ONLY)
+    def get_conversation_map(workspace_id: str) -> dict[str, Any]:
+        """Read its compact digest, themes, recurring ideas, and typed follow-ups."""
+        return _conversation_map(workspace_id)
 
     @mcp.tool(annotations=READ_ONLY)
     def recall_workspace(

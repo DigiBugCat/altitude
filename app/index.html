@@ -1,7 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>magpie — a metabolism for your thoughts</title>
+<title>magpie — a conversation map over memory</title>
 <style>
 :root{
   --ink:#141311; --deep:#1b1914; --field:#211e18; --cream:#f9f4ed; --card-ink:#201e1d;
@@ -141,10 +141,17 @@ body{
 .card .kick{font-family:Caprasimo,Georgia,serif;font-size:9px;letter-spacing:.11em}
 .card .tag{font-size:9px;font-weight:700;color:#82796a}
 .card .tag.kept{color:var(--accent-700)}
+.card .cmeta{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:5px}
+.atype{
+  display:inline-flex;align-items:center;border:1px solid rgba(100,92,80,.28);
+  border-radius:999px;padding:1px 6px;font-size:8px;font-weight:800;letter-spacing:.08em;
+  line-height:1.4;color:var(--quiet);background:rgba(255,255,255,.28);
+}
+.heard{font-size:9px;font-weight:650;color:var(--accent-700)}
 .card .ctext{font-size:12px;font-weight:600;line-height:1.35}
 .card .cfoot{font-size:9.5px;color:var(--quiet);margin-top:5px}
 
-/* synthesis rail */
+/* conversation map rail */
 #synth{
   grid-area:synth;min-width:0;background:var(--cream);color:var(--card-ink);
   display:flex;flex-direction:column;overflow:hidden;
@@ -152,14 +159,28 @@ body{
 #synth .sh{flex:none;padding:16px 16px 12px;border-bottom:1px solid var(--divider)}
 #synth .sh .t{font-family:Caprasimo,Georgia,serif;font-size:15px}
 #synth .sh .m{font-size:12px;color:var(--quiet);margin-top:2px}
-#synthlist{flex:none;max-height:264px;overflow-y:auto;padding:12px 16px;display:flex;flex-direction:column;gap:7px;border-bottom:1px solid var(--divider)}
+#synthlist{flex:none;max-height:360px;overflow-y:auto;padding:12px 16px;display:flex;flex-direction:column;gap:10px;border-bottom:1px solid var(--divider)}
 .synth{
-  flex:none;cursor:pointer;border-radius:7px;background:#fbe3d3;padding:9px 11px;
-  border-left:3px solid var(--accent);
+  width:100%;flex:none;cursor:pointer;border:0;border-radius:7px;background:#fbe3d3;padding:9px 11px;
+  border-left:3px solid var(--accent);color:var(--card-ink);font:inherit;text-align:left;
 }
 .synth .t{font-size:12px;font-weight:600;line-height:1.4}
 .synth .m{font-size:10px;color:var(--accent-700);margin-top:4px}
 #nosynth{font-size:12px;color:#82796a;line-height:1.45}
+.digestgroup{display:flex;flex-direction:column;gap:5px}
+.digestgroup .dh{font-size:9px;font-weight:850;letter-spacing:.1em;color:var(--quiet)}
+.mapitem{
+  width:100%;text-align:left;font:inherit;color:var(--card-ink);border:0;border-radius:7px;
+  background:#efe8dd;padding:7px 9px;border-left:3px solid var(--sand);
+}
+button.mapitem{cursor:pointer}
+button.mapitem:hover{filter:brightness(.98)}
+.mapitem .t{font-size:11.5px;font-weight:650;line-height:1.35}
+.mapitem .m{font-size:9.5px;color:var(--quiet);margin-top:3px}
+.digestgroup.recurring .mapitem{border-left-color:var(--accent)}
+.digestgroup.questions .mapitem{border-left-color:#c9b79c}
+.digestgroup.between .mapitem{background:#fbe3d3;border-left-color:var(--accent)}
+.artifactrows{display:flex;flex-direction:column;gap:5px}
 #memorywrap{flex:none;padding:11px 16px;border-bottom:1px solid var(--divider)}
 #memoryhead{display:flex;align-items:center;justify-content:space-between;gap:8px}
 #memoryhead .t{font-size:11px;font-weight:800;letter-spacing:.08em;color:var(--quiet)}
@@ -353,25 +374,25 @@ body{
   <span class="q" id="question" title="click to set the question">…</span>
   <span style="flex:1"></span>
   <span class="prov" id="prov"></span>
-  <span class="cap" id="cap">0 / 12 cards</span>
-  <span class="phase"><span class="dot" id="dot"></span><span id="phase">drifting</span></span>
+  <span class="cap" id="cap">0 / 12 ideas</span>
+  <span class="phase"><span class="dot" id="dot"></span><span id="phase">mapping</span></span>
 </div>
 
 <div id="shell">
   <div id="index">
-    <div class="rh">FIELDS</div>
+    <div class="rh">THEMES</div>
     <div id="idxlist"></div>
     <div id="idxfoot">
-      <div class="kv"><span>Fusions</span><b id="nmerges">0</b></div>
-      <div class="kv"><span>Archived</span><b id="narchived">0</b></div>
-      <button id="clearfocus">All fields</button>
-      <button id="addsection" class="dash">+ New field</button>
+      <div class="kv"><span>Connections</span><b id="nmerges">0</b></div>
+      <div class="kv"><span>Archived ideas</span><b id="narchived">0</b></div>
+      <button id="clearfocus">All themes</button>
+      <button id="addsection" class="dash">+ New theme</button>
     </div>
   </div>
   <div id="field"></div>
   <div id="synth">
-    <div class="sh"><div class="t" id="synthtitle">Workspace synthesis</div><div class="m" id="synthmeta">generated as cards drift together</div></div>
-    <div id="synthlist"><div id="nosynth">Emergent theses will appear here as cards drift together.</div></div>
+    <div class="sh"><div class="t" id="synthtitle">Conversation map</div><div class="m" id="synthmeta">themes, recurring ideas, and what remains open</div></div>
+    <div id="synthlist"><div id="nosynth">The conversation map will take shape as ideas accumulate.</div></div>
     <div id="memorywrap">
       <div id="memoryhead"><div class="t">FROM MEMORY</div><button id="memoryrecall" type="button">Recall</button></div>
       <div id="memorystatus">Raven is not configured.</div>
@@ -393,13 +414,13 @@ body{
       <div class="lh">WORKSPACE ACTIVITY</div>
       <div id="ledger"></div>
     </div>
-    <div id="harvestwrap"><button id="harvest">Harvest workspace</button></div>
+    <div id="harvestwrap"><button id="harvest">Export conversation digest</button></div>
   </div>
 </div>
 
 <div id="entry">
   <div id="entrypill">
-    <input id="bar" type="text" autocomplete="off" placeholder="Write a thought — Magpie will find its field…">
+    <input id="bar" type="text" autocomplete="off" placeholder="Write a thought — Magpie will find its theme…">
     <span class="chip">⌘K commands</span>
     <span class="chip">keep · kill · judge</span>
   </div>
@@ -817,21 +838,65 @@ function kickOf(c){
   }
   return KICK_OF[c.state]||'OPEN';
 }
+function artifactTypeOf(c){
+  const raw=String((c&&(c.artifact_type||c.semantic_type||c.kind))||'claim')
+    .trim().toLowerCase().replace(/[\s-]+/g,'_');
+  return raw||'claim';
+}
+function artifactLabel(value){
+  return String(value||'idea').replace(/_/g,' ').toUpperCase();
+}
+function occurrenceCount(c){
+  if(!c)return 0;
+  const raw=c.occurrence_count??c.heard_count??c.occurrences??c.count??c.frequency;
+  if(Array.isArray(raw))return raw.length;
+  const count=Number(raw);
+  return Number.isFinite(count)&&count>0?Math.floor(count):0;
+}
+function digestList(value){
+  if(value==null)return [];
+  if(Array.isArray(value))return value;
+  if(typeof value!=='object')return [value];
+  for(const key of ['items','ideas','entries','connections']){
+    if(Array.isArray(value[key]))return value[key];
+  }
+  const textKeys=['text','summary','idea','question','decision','constraint','experiment','task','title','name','content'];
+  if(textKeys.some(key=>value[key]!=null))return [value];
+  return Object.entries(value).map(([key,item])=>
+    item&&typeof item==='object'?Object.assign({_key:key},item):{_key:key,text:item});
+}
+function digestText(item){
+  if(item==null)return '';
+  if(typeof item!=='object')return String(item);
+  for(const key of ['text','summary','idea','question','decision','constraint','experiment','task','title','name','content']){
+    if(item[key]!=null&&String(item[key]).trim())return String(item[key]);
+  }
+  return '';
+}
+function digestMeta(item){
+  if(!item||typeof item!=='object')return '';
+  return String(item.rationale||item.why||item.note||item.detail||item.relation||'');
+}
 
 /* ---------- render ---------- */
 function render(){
   const d=V.data;
   const secs=sections(), cs=cards(), W=weights(secs,cs);
+  const hasPopulatedTheme=secs.some(s=>W[s.key]&&W[s.key].count>0);
+  const displaySecs=secs.filter(s=>!(
+    s.key==='field' && hasPopulatedTheme && W[s.key] && W[s.key].count===0
+  ));
+  if(V.focus && !displaySecs.some(s=>s.key===V.focus)) V.focus=null;
   const cap=(d&&(d.capacity||d.cap))||12;
   const pairIds=cs.filter(c=>c.state==='testing').map(c=>c.id);
 
   // top bar
   renderWorkspaceControl();
   $('#question').textContent=(d&&d.question)?d.question:'Click to set the question…';
-  $('#cap').textContent=cs.length+' / '+cap+' cards';
+  $('#cap').textContent=cs.length+' / '+cap+' ideas';
   $('#cap').classList.toggle('full',cs.length>=cap);
   const converging=pairIds.length>0;
-  $('#phase').textContent=V.offline?'field offline':(converging?'two are converging':'drifting');
+  $('#phase').textContent=V.offline?'field offline':(converging?'two are converging':'mapping');
   $('#dot').classList.toggle('off',V.offline);
 
   const provs=(d&&d.providers)||[];
@@ -848,20 +913,20 @@ function render(){
 
   $('#bar').placeholder=converging
     ?'Two cards are being pulled together — keep one apart if you disagree…'
-    :'Write a thought — Magpie will find its field…';
+    :'Write a thought — Magpie will find its theme…';
 
   // index rail
-  const idx=secs.map(s=>({s,w:W[s.key]})).sort((a,b)=>b.w.mass-a.w.mass);
+  const idx=displaySecs.map(s=>({s,w:W[s.key]})).sort((a,b)=>b.w.mass-a.w.mass);
   $('#idxlist').innerHTML=idx.map(({s,w})=>`
     <div class="idx${V.focus===s.key?' on':''}" data-k="${esc(s.key)}">
       <div class="r1"><span class="pip" style="background:${esc(s.color)}"></span><span class="nm">${esc(s.name)}</span></div>
-      <div class="r2"><span>${w.count} cards</span><span>${w.mass.toFixed(2)}</span></div>
+      <div class="r2"><span>${w.count} ${w.count===1?'idea':'ideas'}</span><span>${w.mass.toFixed(2)}</span></div>
       <div class="track"><span class="fill" style="background:${esc(s.color)};width:${Math.round(w.norm*100)}%"></span></div>
     </div>`).join('');
   document.querySelectorAll('.idx').forEach(el=>el.onclick=()=>{V.focus=el.dataset.k;render();});
 
   // field
-  const visibleSecs=V.focus?secs.filter(s=>s.key===V.focus):secs;
+  const visibleSecs=V.focus?displaySecs.filter(s=>s.key===V.focus):displaySecs;
   const rows=V.focus
     ?[visibleSecs]
     :[visibleSecs.filter(s=>s.row===0),visibleSecs.filter(s=>s.row===1)].filter(r=>r.length);
@@ -877,25 +942,29 @@ function render(){
         opacity:${V.focus&&!isFocus?.38:1}">
         <div class="shead">
           <input value="${esc(s.name)}" data-k="${esc(s.key)}" data-original="${esc(s.name)}"
-            aria-label="Field name" spellcheck="false" style="color:${esc(s.color)}">
-          <span class="smeta">· ${w.count} ${w.count===1?'card':'cards'}</span>
+            aria-label="Theme name" spellcheck="false" style="color:${esc(s.color)}">
+          <span class="smeta">· ${w.count} ${w.count===1?'idea':'ideas'}</span>
           <span class="sweight" style="color:${esc(s.color)}">${w.mass.toFixed(2)}</span>
         </div>
         ${shown.map((c,k)=>{
           const inPair=pairIds.includes(c.id), drawn=inPair;
           const kick=kickOf(c);
           const fresh=(c.id===V.born);
+          const artifactType=artifactTypeOf(c);
+          const heard=occurrenceCount(c);
           return `<div class="card${inPair?' inpair':''}${c.id===V.sel?' sel':''}" data-id="${esc(c.id)}"
             style="margin-left:${drawn?4:(k%2)*14}px;margin-right:${drawn?4:(k%2)?0:14}px;
             animation:${fresh?'pop .5s ease':BOBS[hashSeat(c.id)%3]}">
             <div class="cr1"><span class="kick" style="color:${KICK_COLOR[kick]||'#645c50'}">${esc(kick)}</span>
             <span class="tag${c.pinned?' kept':''}">${c.pinned?'KEPT':(Number(c.mass)||0).toFixed(2)}</span></div>
+            <div class="cmeta"><span class="atype">${esc(artifactLabel(artifactType))}</span>
+              ${heard>1?`<span class="heard">heard ${heard} times</span>`:''}</div>
             <div class="ctext">${esc(c.text)}</div>
             <div class="cfoot">${esc(c.receipt||c.foot||'')}</div>
           </div>`;}).join('')}
         ${list.length===0?`<div class="emptyfield">
           <div class="eicon">+</div>
-          <div class="et">No cards here yet</div>
+          <div class="et">No ideas in this theme yet</div>
           <div class="em">Add a thought below or bring in something from memory.</div>
         </div>`:''}
         ${list.length>shown.length?`<div class="quietrow">+ ${list.length-shown.length} held under</div>`:''}
@@ -925,15 +994,89 @@ function render(){
     e.stopPropagation(); V.sel=el.dataset.id; render();
   });
 
-  // synthesis rail
+  // Conversation map. New servers provide a structured digest; legacy state
+  // keeps the existing synthesis list as a useful, non-breaking fallback.
   const syn=cs.filter(c=>c.kind==='synthesis'&&(!V.focus||c.section===V.focus))
     .sort((a,b)=>(b.born||0)-(a.born||0)).slice(0,6);
-  $('#synthtitle').textContent=V.focus?'Field synthesis':'Workspace synthesis';
-  $('#synthmeta').textContent=syn.length?syn.length+' emergent theses · newest first':'generated as cards drift together';
-  $('#synthlist').innerHTML=syn.length
-    ? syn.map(t=>`<div class="synth" data-id="${esc(t.id)}"><div class="t">${esc(t.text)}</div><div class="m">${esc(t.receipt||t.foot||'')}</div></div>`).join('')
-    : '<div id="nosynth">Emergent theses will appear here as cards drift together.</div>';
+  const rawDigest=d&&d.digest&&typeof d.digest==='object'?d.digest:null;
+  const themeSummaries=digestList(rawDigest&&(rawDigest.theme_summaries??rawDigest.themes));
+  const recurring=digestList(rawDigest&&(rawDigest.recurring_ideas??rawDigest.recurring));
+  const openQuestions=digestList(rawDigest&&(rawDigest.open_questions??rawDigest.unresolved_questions??rawDigest.questions));
+  const digestArtifacts=rawDigest&&rawDigest.artifacts&&typeof rawDigest.artifacts==='object'?rawDigest.artifacts:{};
+  const artifactGroups=[
+    ['DECISIONS','decision',digestList(rawDigest&&(rawDigest.decisions??digestArtifacts.decisions))],
+    ['CONSTRAINTS','constraint',digestList(rawDigest&&(rawDigest.constraints??digestArtifacts.constraints))],
+    ['EXPERIMENTS','experiment',digestList(rawDigest&&(rawDigest.experiments??digestArtifacts.experiments))],
+    ['TASKS','task',digestList(rawDigest&&(rawDigest.tasks??digestArtifacts.tasks))]
+  ].filter(([, ,items])=>items.length);
+  const between=digestList(rawDigest&&rawDigest.between_ideas).slice(0,3);
+  const cardMap=new Map(cs.map(c=>[String(c.id),c]));
+  const digestItem=(item,meta='',extraClass='')=>{
+    const text=digestText(item);
+    if(!text)return '';
+    const rawId=item&&typeof item==='object'?(item.card_id||item.local_ref||item.id):'';
+    const cardId=rawId&&cardMap.has(String(rawId))?String(rawId):'';
+    const tag=cardId?'button':'div';
+    return `<${tag} class="mapitem ${extraClass}"${cardId?` type="button" data-id="${esc(cardId)}"`:''}>
+      <div class="t">${esc(text)}</div>${meta?`<div class="m">${esc(meta)}</div>`:''}
+    </${tag}>`;
+  };
+  const mapGroups=[];
+  if(themeSummaries.length){
+    mapGroups.push(`<section class="digestgroup themes"><div class="dh">THEME SUMMARIES</div>${
+      themeSummaries.map(item=>{
+        const theme=item&&typeof item==='object'?(item.name||item.theme||item.section_name||item.section||item._key):'';
+        const cards=item&&typeof item==='object'?Number(item.card_count??item.count):0;
+        const mentions=item&&typeof item==='object'?Number(item.occurrence_count):0;
+        const topIdeas=item&&typeof item==='object'
+          ?digestList(item.top_ideas).slice(0,2).map(digestText).filter(Boolean):[];
+        const summary=item&&typeof item==='object'&&item.summary
+          ?String(item.summary):(topIdeas.join(' · ')||theme);
+        const displayItem=item&&typeof item==='object'?Object.assign({},item,{text:summary}):item;
+        return digestItem(displayItem,[
+          theme&&summary!==theme?theme:'',
+          cards>0?`${cards} ${cards===1?'idea':'ideas'}`:'',
+          mentions>cards?`${mentions} mentions`:''
+        ].filter(Boolean).join(' · '));
+      }).join('')
+    }</section>`);
+  }
+  if(recurring.length){
+    mapGroups.push(`<section class="digestgroup recurring"><div class="dh">RECURRING IDEAS</div>${
+      recurring.map(item=>{
+        const heard=occurrenceCount(item);
+        return digestItem(item,heard?`heard ${heard} ${heard===1?'time':'times'}`:digestMeta(item));
+      }).join('')
+    }</section>`);
+  }
+  if(openQuestions.length){
+    mapGroups.push(`<section class="digestgroup questions"><div class="dh">OPEN QUESTIONS</div>${
+      openQuestions.map(item=>digestItem(item,digestMeta(item))).join('')
+    }</section>`);
+  }
+  if(artifactGroups.length){
+    mapGroups.push(`<section class="digestgroup artifacts"><div class="dh">WHAT THE CONVERSATION PRODUCED</div>
+      <div class="artifactrows">${artifactGroups.map(([label,type,items])=>
+        items.map(item=>digestItem(item,label,`artifact-${type}`)).join('')).join('')}</div></section>`);
+  }
+  if(between.length){
+    mapGroups.push(`<section class="digestgroup between"><div class="dh">BETWEEN IDEAS</div>${
+      between.map(item=>digestItem(item,digestMeta(item))).join('')
+    }</section>`);
+  }
+  $('#synthtitle').textContent='Conversation map';
+  $('#synthmeta').textContent=V.focus
+    ?'A theme is selected; this map stays conversation-wide'
+    :(mapGroups.length?'themes, repetitions, and useful outcomes':'themes, recurring ideas, and what remains open');
+  $('#synthlist').innerHTML=mapGroups.length
+    ?mapGroups.join('')
+    :(syn.length
+      ?`<section class="digestgroup between"><div class="dh">CONNECTIONS</div>${syn.map(t=>
+        `<button type="button" class="synth" data-id="${esc(t.id)}"><div class="t">${esc(t.text)}</div><div class="m">${esc(t.receipt||t.foot||'')}</div></button>`
+      ).join('')}</section>`
+      :'<div id="nosynth">The conversation map will take shape as ideas accumulate.</div>');
   document.querySelectorAll('.synth').forEach(el=>el.onclick=()=>{V.sel=el.dataset.id;render();});
+  document.querySelectorAll('.mapitem[data-id]').forEach(el=>el.onclick=()=>{V.sel=el.dataset.id;render();});
 
   // Raven stays private behind Magpie. These are workspace-local suggestions,
   // and importing one always creates an ordinary open card.
@@ -954,7 +1097,7 @@ function render(){
     return `<div class="memory" data-memory-id="${esc(item.memory_id)}">
       <div class="t">${esc(m.content||'Untitled memory')}</div>
       <div class="m">${esc(meta)}</div>
-      <div class="a"><button class="import" data-action="adopt">${V.focus?'Bring into this field':'Bring into workspace'}</button>
+      <div class="a"><button class="import" data-action="adopt">${V.focus?'Bring into this theme':'Bring into conversation'}</button>
       <button data-action="dismiss">Not here</button></div>
     </div>`;
   }).join('');
@@ -978,10 +1121,17 @@ function render(){
   $('#selpanel').classList.toggle('open',!!sel);
   if(sel){
     if(document.activeElement!==$('#seltext')) $('#seltext').value=sel.text||'';
-    $('#selmeta').textContent=kickOf(sel)+' · mass '+(Number(sel.mass)||0).toFixed(2)
+    const selectedType=artifactTypeOf(sel);
+    const heard=occurrenceCount(sel);
+    $('#selmeta').textContent=artifactLabel(selectedType)+' · '+kickOf(sel)+' · mass '+(Number(sel.mass)||0).toFixed(2)
+      +(heard>1?' · heard '+heard+' times':'')
       +' · '+(sel.receipt||sel.foot||'no receipt yet');
     $('#keepbtn').textContent=sel.pinned?'Release':'Keep';
-    $('#moverow').innerHTML='<span>Move to field</span>'+secs.filter(s=>s.key!==sel.section)
+    const canJudge=selectedType==='claim';
+    $('#yesbtn').hidden=!canJudge;
+    $('#nobtn').hidden=!canJudge;
+    $('#unkbtn').hidden=!canJudge;
+    $('#moverow').innerHTML='<span>Move to theme</span>'+displaySecs.filter(s=>s.key!==sel.section)
       .map(s=>`<button data-k="${esc(s.key)}">${esc(s.name)}</button>`).join('');
     document.querySelectorAll('#moverow button').forEach(b=>b.onclick=()=>{
       act('/api/move',{id:sel.id,section:b.dataset.k});
@@ -991,7 +1141,7 @@ function render(){
   // ledger (+ offline note)
   const rows2=ledger().map(l=>{
     const label=LEDGER_LABEL[l.kind]||l.kind;
-    const text=l.kind==='SECTION'?String(l.text||'').replace(/^section\b/i,'field'):l.text;
+    const text=l.kind==='SECTION'?String(l.text||'').replace(/^section\b/i,'theme'):l.text;
     return `
     <div class="lg" style="border-left-color:${LEDGER_COLOR[l.kind]||'#645c50'}">
       <div class="k" style="color:${LEDGER_COLOR[l.kind]||'#645c50'}">${esc(label)}</div>
@@ -1010,7 +1160,7 @@ $('#workspaces').onchange=e=>openWorkspace(e.target.value);
 $('#newworkspace').onclick=createWorkspace;
 $('#clearfocus').onclick=()=>{V.focus=null;render();};
 $('#addsection').onclick=async()=>{
-  const name=prompt('Name the field');
+  const name=prompt('Name the theme');
   if(!name||!name.trim())return;
   const result=await act('/api/section',{
     name:name.trim(),

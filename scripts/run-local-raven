@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+magpie_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+raven_dir="$(cd "${magpie_dir}/../raven" && pwd)"
+raven_env="${RAVEN_ENV_FILE:-${raven_dir}/.env.magpie}"
+
+if [[ ! -f "${raven_env}" ]]; then
+  echo "Missing ${raven_env}; see ${raven_dir}/LOCAL_MAGPIE_STACK.md." >&2
+  exit 1
+fi
+
+set -a
+# This file is private (0600) and contains the Fireworks key used by both
+# Raven embeddings and Magpie's default OpenAI-compatible inference provider.
+source "${raven_env}"
+set +a
+
+if [[ -z "${FIREWORKS_API_KEY:-}" ]]; then
+  echo "FIREWORKS_API_KEY is empty in ${raven_env}." >&2
+  exit 1
+fi
+
+"${raven_dir}/scripts/magpie-stack" up --build -d
+
+export MAGPIE_RAVEN_URL="${MAGPIE_RAVEN_URL:-http://127.0.0.1:${RAVEN_PORT:-7326}/mcp}"
+export MAGPIE_RAVEN_AGENT_ID="${MAGPIE_RAVEN_AGENT_ID:-magpie}"
+
+cd "${magpie_dir}"
+exec .venv/bin/python -m magpie.server "$@"

@@ -1,0 +1,270 @@
+Metadata-Version: 2.4
+Name: aviary-magpie
+Version: 0.1.0
+Summary: A persistent thought field with browser, JSON, and MCP interfaces.
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: aviary-mcp==0.1.0rc6
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
+
+# magpie — a metabolism for your thoughts
+
+A field, not a notes app. You seed a question; claims arrive, drift into
+weighted sections, collide with each other, and fuse into syntheses. Nothing
+becomes *settled* without a receipt — that is the law, enforced in
+`magpie/engine.py`, the single deterministic state machine everything else
+talks to.
+
+- `magpie/engine.py` — the law: cards, sections, collide/resolve/judge,
+  frontier ranking, cap enforcement, ledger, harvest. Pure, no I/O.
+- `magpie/providers.py` — one configurable OpenAI-compatible inference client.
+- `magpie/workers.py` — one-shot cognition (atomize, propose a fusion).
+- `magpie/storage.py` — SQLite workspaces, the shared idea bank, durable
+  retrieval events, and embedding-ready memory records.
+- `magpie/server.py` — shared storage/engine lifecycle, JSON handlers, and background metabolism.
+- `magpie/http_runtime.py` — one-port AviaryMCP + browser/JSON HTTP runtime.
+- `magpie/mcp_surface.py` — bounded agent tools with explicit workspace routing.
+- `app/index.html` — the field UI.
+
+Inference proposes structure; it does not verify it. A generated fusion returns
+to the field as an open proposal with provider provenance. Only a human
+judgment or a future verification runtime may supply the receipt needed to
+settle it. `magpie.server.VerificationHook` is the intentionally dormant
+boundary for that future runtime.
+
+Runtime state (SQLite database, legacy snapshot, harvests) lives outside the code directory.
+Magpie uses `MAGPIE_RUNTIME_DIR` when set, then `$XDG_STATE_HOME/magpie`, and
+otherwise `~/.local/state/magpie`.
+
+## Workspaces and memory
+
+A workspace is a durable, resumable working surface. Creating one starts with
+a fresh engine; opening one restores its cards, sections, and question. Ideas
+created in any workspace are also linked into a shared canonical idea bank.
+Exact normalized duplicates reuse the same bank idea while preserving a
+separate occurrence and provenance in each workspace.
+
+SQLite is the source of truth at `MAGPIE_RUNTIME_DIR/magpie.sqlite3`. On first
+boot, an existing `state.json` is imported into one workspace and left
+untouched as a recovery artifact.
+
+Meaningful workspace changes append durable events such as
+`thought.submitted`, `claims.created`, and `claim.resolved`. A future
+server-side retrieval worker will consume these events and populate the memory
+shelf. The schema already supports versioned embedding blobs and memory
+exposures, but this release does not call an embedding model or retrieve old
+ideas automatically.
+
+The browser exposes a compact workspace picker. The same lifecycle is
+available through the CLI:
+
+```sh
+python3 -m magpie.cli workspace list
+python3 -m magpie.cli workspace create "Mobile checkout" \
+  --question "Why did conversion fall?"
+python3 -m magpie.cli workspace open ws_...
+python3 -m magpie.cli workspace current
+```
+
+## Run
+
+```sh
+cd <path-to-aviary>/birds/magpie
+uv sync
+uv run python -m magpie.server            # 127.0.0.1:7351
+uv run python -m magpie.server --port 7351
+```
+
+Python 3.11+. The application pins AviaryMCP in `pyproject.toml` and `uv.lock`.
+
+The one listener exposes:
+
+- `/` — the local browser field
+- `/api/*` — the existing JSON control plane
+- `/mcp` — stateless Streamable HTTP MCP
+- `/birdz` — process liveness
+- `/mcp-api/v1/*` — AviaryMCP's generated tool catalog/REST/OpenAPI face
+
+MCP tools never use or change the browser's process-wide active workspace.
+Every field operation requires a stable `workspace_id`. The safe catalog is
+`guide`, `list_workspaces`, `create_workspace`, `get_field`, `seed_field`,
+`contribute`, `collide`, `organize`, and `harvest`. Human judgment, dismissal,
+verification, and receipt ingestion are intentionally unavailable over MCP.
+
+## ElevenLabs voice agent
+
+The microphone button starts a private ElevenLabs Agent conversation. Speech is
+handled by ElevenLabs; the agent operates the current Magpie field through the
+MCP tools. The browser sends the selected `workspace_id` as a conversation
+dynamic variable and ends the conversation before switching workspaces.
+
+Configure the server, never browser JavaScript:
+
+```sh
+export ELEVENLABS_API_KEY=...
+export ELEVENLABS_AGENT_ID=agent_...
+```
+
+The browser requests `POST /api/voice/session`; Magpie exchanges the server-side
+key for a short-lived signed WebSocket URL. The long-lived key is never returned
+to the browser.
+
+Configure the ElevenLabs agent with:
+
+- MCP transport: Streamable HTTP
+- URL: `https://aviary.finchmcp.com/magpie/mcp`
+- Authorization: a Finch key scoped only to Magpie
+- Dynamic variable: `workspace_id`
+- Prompt: always pass `{{workspace_id}}` to workspace-scoped Magpie tools
+- Auto-approved: `guide`, `list_workspaces`, `get_field`, `contribute`
+- Approval required initially: `create_workspace`, `seed_field`, `collide`,
+  `organize`, `harvest`
+
+The UI handles MCP approval requests with visible Allow/Reject controls. Users
+must be informed before starting that they are speaking with an AI and that the
+conversation may be recorded or shared according to the configured ElevenLabs
+privacy settings.
+
+## Pelican and Finch
+
+Install `aviary-magpie.service` as a systemd user unit, put provider and
+ElevenLabs secrets in `~/.config/aviary/magpie.env`, then:
+
+```sh
+systemctl --user enable --now aviary-magpie.service
+curl -sf http://127.0.0.1:7351/birdz
+finch add magpie --service http://127.0.0.1:7351 --json
+systemctl --user restart finch-tunnel.service
+```
+
+Finch's bare-service registration publishes only `/mcp`; the browser and JSON
+API remain loopback-local. An unauthenticated request to the public MCP URL
+should return `401`, proving the edge route is live and gated.
+
+Prompt experiments and the hidden-memory claim contract are developed
+separately from the production runtime. See
+[`evals/README.md`](evals/README.md) for the Braintrust matrix, datasets, and
+offline smoke command.
+
+## Inference
+
+The default endpoint is Fireworks' OpenAI-compatible API. Configure the model
+and key at runtime:
+
+```sh
+export FIREWORKS_API_KEY=...
+export MAGPIE_LLM_MODEL=accounts/fireworks/models/gpt-oss-120b
+python3 -m magpie.server
+```
+
+For another OpenAI-compatible endpoint, also set
+`MAGPIE_LLM_BASE_URL`; optionally set `MAGPIE_LLM_API_KEY` and
+`MAGPIE_LLM_NAME`. The deterministic stub is never an automatic fallback:
+enable it explicitly for offline demos with `MAGPIE_LLM_STUB=1`.
+
+Persistent state defaults to `~/.local/state/magpie`. Override it with
+`MAGPIE_RUNTIME_DIR`.
+
+For a deterministic offline test:
+
+```sh
+MAGPIE_PROVIDERS=stub uv run python -m magpie.server
+```
+
+Then open <http://127.0.0.1:7351>. `MAGPIE_PROVIDERS=stub` keeps the local
+test session deterministic and offline; omit it to use the configured
+inference backend.
+
+## Drive the runtime from the CLI
+
+`magpie.cli` talks to the public HTTP API used by the browser. It does not
+import or mutate the engine directly, so CLI automation exercises the real
+server boundary.
+
+Start a server in one terminal:
+
+```sh
+MAGPIE_PROVIDERS=stub \
+MAGPIE_RUNTIME_DIR=/tmp/magpie-dev \
+uv run python -m magpie.server
+```
+
+Drive it from another:
+
+```sh
+python3 -m magpie.cli state
+python3 -m magpie.cli seed "What makes this idea work?"
+python3 -m magpie.cli propose "The feedback loop must be repeatable."
+python3 -m magpie.cli keep c1
+python3 -m magpie.cli move c1 evidence
+python3 -m magpie.cli judge c1 yes
+python3 -m magpie.cli harvest
+```
+
+Every command writes JSON to stdout and returns a nonzero exit status when the
+server cannot be reached or rejects the request. Use `--url` to drive a server
+on another port or host:
+
+```sh
+python3 -m magpie.cli --url http://127.0.0.1:8000 state
+```
+
+For an endpoint added before the typed CLI catches up, `call` provides a
+generic JSON escape hatch:
+
+```sh
+python3 -m magpie.cli call seed --data '{"question":"Does it compose?"}'
+```
+
+### Repeatable scenarios
+
+A scenario is a JSON document containing actions, waits, and assertions. Run
+one against an existing server:
+
+```sh
+python3 -m magpie.cli scenario scenarios/smoke.json
+```
+
+Or let the CLI create and stop an isolated server automatically:
+
+```sh
+python3 -m magpie.cli run scenarios/smoke.json
+```
+
+The isolated form uses a temporary state directory and the offline stub. Pass
+`--runtime-dir PATH` to keep the resulting state. Use `--providers configured`
+to opt into the inference backend already configured through the
+`MAGPIE_LLM_*` environment variables.
+
+Scenario steps use these shapes:
+
+```json
+{
+  "steps": [
+    {"action": "seed", "question": "What are we testing?"},
+    {"action": "propose", "text": "A claim generated over HTTP."},
+    {
+      "wait": {"path": "cards.count", "equals": 1},
+      "timeout": 5
+    },
+    {"action": "keep", "id": "@card:0"},
+    {"assert": {"path": "question", "equals": "What are we testing?"}},
+    {"state": true}
+  ]
+}
+```
+
+`@card:0` resolves to the first live card's ID immediately before the action.
+Available stable metrics are `cards.count`, `cards.open`, `cards.testing`,
+`cards.settled`, `ledger.count`, and `providers.count`; ordinary dotted state
+paths such as `question` and `cap` are also supported.
+
+## Test
+
+```sh
+cd <path-to-aviary>/birds/magpie
+pytest tests/
+```
+
+`tests/test_engine.py` is engine-only: no server, no network.

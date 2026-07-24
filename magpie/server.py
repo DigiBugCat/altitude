@@ -63,6 +63,10 @@ STATE_PATH = RUNTIME_DIR / "state.json"
 DB_PATH = RUNTIME_DIR / "magpie.sqlite3"
 
 METABOLISM_PERIOD = 3.0
+AUTO_CONNECTIONS = (
+    os.environ.get("MAGPIE_AUTO_CONNECTIONS", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 
 # --------------------------------------------------------------------------
 # shared mutable state
@@ -199,8 +203,11 @@ def _bank_card(
         return None
     idea, _created = STORE.upsert_idea(
         text,
-        kind=str(data.get("kind") or "claim"),
-        metadata={"provenance": data.get("foot") or ""},
+        kind=str(data.get("artifact_type") or data.get("kind") or "claim"),
+        metadata={
+            "provenance": data.get("foot") or "",
+            "artifact_type": data.get("artifact_type") or "claim",
+        },
     )
     STORE.link_idea(
         workspace_id,
@@ -217,6 +224,40 @@ def _bank_card(
         tags=["magpie", f"workspace:{workspace_id}"],
         episode_id=workspace_id,
         dedupe_key=f"magpie-card:{workspace_id}:{local_ref or idea.id}",
+    )
+    return idea
+
+
+def _bank_occurrence(
+    workspace_id: str | None,
+    card: Any,
+    occurrence_text: str,
+    *,
+    relation: str,
+    source: str = "atomize",
+) -> Any | None:
+    """Persist repeat/refinement provenance without creating Raven noise."""
+    if STORE is None or workspace_id is None:
+        return None
+    data = _card_dict(card)
+    clean = str(occurrence_text or "").strip()
+    if not clean:
+        return None
+    idea, _created = STORE.upsert_idea(
+        clean,
+        kind=str(data.get("artifact_type") or data.get("kind") or "observation"),
+        metadata={"canonical_card_id": data.get("id"), "relation": relation},
+    )
+    STORE.link_idea(
+        workspace_id,
+        idea.id,
+        local_ref=str(data.get("id") or "") or None,
+        source=f"{source}:{relation}",
+        metadata={
+            "canonical_card_id": data.get("id"),
+            "relation": relation,
+            "state": data.get("state"),
+        },
     )
     return idea
 
@@ -368,6 +409,41 @@ def _section_key_for(name: str, engine: Any | None = None) -> str | None:
     return None
 
 
+_THEME_COLORS = (
+    "#b8c99d",
+    "#d9b08c",
+    "#a8c5d6",
+    "#d1b3c4",
+    "#c7b7e5",
+    "#e0c879",
+)
+
+
+def _ensure_theme(engine: Any, name: str | None) -> str | None:
+    """Resolve or create a concise theme while preserving legacy sections.
+
+    Sections are the persisted layout primitive. The thematic product model
+    deliberately reuses that durable shape so old workspaces need no migration.
+    """
+    clean = " ".join(str(name or "").split()).strip()
+    if not clean:
+        return None
+    existing = _section_key_for(clean, engine)
+    if existing:
+        return existing
+    if clean.lower() in {"field", "inbox"}:
+        return "field" if "field" in engine.sections else None
+    key = re.sub(r"[^a-z0-9]+", "-", clean.lower()).strip("-")[:48] or "theme"
+    base = key
+    suffix = 2
+    while key in engine.sections:
+        key = f"{base[:44]}-{suffix}"
+        suffix += 1
+    color = _THEME_COLORS[len(engine.sections) % len(_THEME_COLORS)]
+    engine.add_section(key, clean[:80], color)
+    return key
+
+
 # --------------------------------------------------------------------------
 # worker paths (run off the request thread)
 # --------------------------------------------------------------------------
@@ -384,13 +460,44 @@ def _run_atomize(text: str, workspace_id: str | None = None) -> None:
                 for s in (snap.get("sections") or [])
                 if isinstance(s, dict)
             ]
-        claims = workers.atomize(text, sections)
+            existing_cards = [
+                {
+                    "id": str(card.get("id") or ""),
+                    "text": str(card.get("text") or ""),
+                    "section": str(card.get("section") or ""),
+                    "artifact_type": str(card.get("artifact_type") or "claim"),
+                    "occurrence_count": int(card.get("occurrence_count") or 1),
+                }
+                for card in (snap.get("cards") or [])
+                if isinstance(card, dict) and not card.get("archived")
+            ]
+        try:
+            claims = workers.atomize(
+                text, sections, existing_cards=existing_cards
+            )
+        except TypeError as exc:
+            # Rolling/test compatibility for a two-argument atomizer.
+            if "existing_cards" not in str(exc):
+                raise
+            claims = workers.atomize(text, sections)
     except Exception:
         traceback.print_exc()
-        claims = [{"text": text, "section": None, "foot": "atomize failed · raw"}]
+        claims = [{
+            "text": text,
+            "section": None,
+            "artifact_type": "question" if text.rstrip().endswith("?") else "observation",
+            "relation": "new",
+            "foot": "atomize failed · raw",
+        }]
 
     if not claims:
-        claims = [{"text": text, "section": None, "foot": "atomize empty · raw"}]
+        claims = [{
+            "text": text,
+            "section": None,
+            "artifact_type": "question" if text.rstrip().endswith("?") else "observation",
+            "relation": "new",
+            "foot": "atomize empty · raw",
+        }]
 
     with LOCK:
         target_engine, _is_current = _engine_for_workspace(target_workspace)
@@ -401,18 +508,63 @@ def _run_atomize(text: str, workspace_id: str | None = None) -> None:
         )
         with transaction:
             created_cards = []
+            repeated_cards = []
             for claim in claims:
                 try:
-                    section = claim.get("section") or None
-                    if section:
-                        sections_by_name = {
-                            str(v.get("name") or key): key
-                            for key, v in target_engine.sections.items()
-                        }
-                        section = sections_by_name.get(str(section))
+                    artifact_text = str(claim.get("text") or text).strip()
+                    relation = str(claim.get("relation") or "new").lower()
+                    canonical_id = str(claim.get("canonical_id") or "").strip()
+                    canonical = None
+                    if canonical_id:
+                        candidate = target_engine.cards.get(canonical_id)
+                        if candidate is not None and not candidate.archived:
+                            canonical = candidate
+                    if canonical is None:
+                        canonical = target_engine.find_canonical(artifact_text)
+                    if canonical is not None and relation in {
+                        "repeat", "refinement"
+                    }:
+                        card = target_engine.record_occurrence(
+                            canonical.id,
+                            artifact_text,
+                            relation=relation,
+                            foot=str(claim.get("foot") or ""),
+                        )
+                        _bank_occurrence(
+                            target_workspace,
+                            card,
+                            artifact_text,
+                            relation=relation,
+                        )
+                        repeated_cards.append(card)
+                        continue
+                    # Exact duplicates are always consolidated even when a
+                    # provider forgets to label them as repeats.
+                    if canonical is not None and relation != "contradiction":
+                        card = target_engine.record_occurrence(
+                            canonical.id,
+                            artifact_text,
+                            relation="repeat",
+                            foot=str(claim.get("foot") or ""),
+                        )
+                        _bank_occurrence(
+                            target_workspace,
+                            card,
+                            artifact_text,
+                            relation="repeat",
+                        )
+                        repeated_cards.append(card)
+                        continue
+                    section = _ensure_theme(
+                        target_engine,
+                        claim.get("theme") or claim.get("section"),
+                    )
                     card = target_engine.propose(
-                        claim.get("text") or text,
+                        artifact_text,
                         section=section,
+                        artifact_type=str(
+                            claim.get("artifact_type") or "observation"
+                        ),
                         foot=claim.get("foot", ""),
                     )
                 except Exception:
@@ -433,6 +585,9 @@ def _run_atomize(text: str, workspace_id: str | None = None) -> None:
                 event_payload={
                     "submitted_text": text,
                     "card_ids": [card.id for card in created_cards],
+                    "repeated_card_ids": sorted(
+                        {card.id for card in repeated_cards}
+                    ),
                 },
                 increment_context=True,
             )
@@ -1571,17 +1726,19 @@ def serve(port: int = PORT, host: str = HOST) -> None:
     with LOCK:
         _persist()
 
-    metabolism = threading.Thread(
-        target=_metabolism_loop,
-        daemon=True,
-        name="magpie-metabolism",
-    )
     raven_outbox = threading.Thread(
         target=_raven_outbox_loop,
         daemon=True,
         name="magpie-raven-outbox",
     )
-    metabolism.start()
+    metabolism: threading.Thread | None = None
+    if AUTO_CONNECTIONS:
+        metabolism = threading.Thread(
+            target=_metabolism_loop,
+            daemon=True,
+            name="magpie-metabolism",
+        )
+        metabolism.start()
     raven_outbox.start()
     # ``local`` access is loopback-only by SDK invariant: the browser field and
     # JSON plane carry no auth. A container binds beyond loopback, so it must
@@ -1604,7 +1761,8 @@ def serve(port: int = PORT, host: str = HOST) -> None:
         pass
     finally:
         _STOP.set()
-        metabolism.join(timeout=METABOLISM_PERIOD + 1)
+        if metabolism is not None:
+            metabolism.join(timeout=METABOLISM_PERIOD + 1)
         raven_outbox.join(timeout=RAVEN_OUTBOX_PERIOD + 1)
         with LOCK:
             _persist()

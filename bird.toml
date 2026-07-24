@@ -1,0 +1,5 @@
+name = "magpie"
+port = 7351
+box = "pelican"
+status = "live"
+summary = "A thematic conversation map over Raven memory, with typed ideas, repetition-aware deduplication, and optional connections."
