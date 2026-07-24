@@ -17,32 +17,33 @@ from magpie import mcp_surface
 from magpie import server
 
 
+# SPEC §3.2 — the agent-facing catalog. `collide` is gone (§2.1); the ladder
+# operations that replace it can propose structure but never settle it.
 SAFE_TOOLS = {
     "guide",
     "list_workspaces",
     "create_workspace",
     "get_field",
+    "descend",
     "get_conversation_map",
+    "pending_clicks",
     "recall_workspace",
     "adopt_memory",
     "seed_field",
     "contribute",
-    "collide",
+    "propose_click",
+    "reconsider_pair",
+    "derive",
+    "unfold",
     "organize",
     "harvest",
 }
-WORKSPACE_SCOPED_TOOLS = {
-    "get_field",
-    "get_conversation_map",
-    "recall_workspace",
-    "adopt_memory",
-    "seed_field",
-    "contribute",
-    "collide",
-    "organize",
-    "harvest",
+WORKSPACE_SCOPED_TOOLS = SAFE_TOOLS - {"guide", "list_workspaces", "create_workspace"}
+# Judgment and receipt ingestion stay off MCP entirely — and so does
+# `resolve_click`: confirming a click is a human act (§1.6, §2.4).
+PROVENANCE_OR_DESTRUCTIVE_TOOLS = {
+    "judge", "kill", "verify", "resolve", "resolve_click", "collide",
 }
-PROVENANCE_OR_DESTRUCTIVE_TOOLS = {"judge", "kill", "verify"}
 
 
 @pytest.fixture
@@ -275,8 +276,7 @@ def test_get_conversation_map_returns_a_normalized_sparse_digest(mcp_server):
         request_id=9,
     )
 
-    assert result["workspace_id"] == workspace_id
-    assert set(result["digest"]) >= {
+    keys = {
         "themes",
         "recurring_ideas",
         "open_questions",
@@ -284,35 +284,26 @@ def test_get_conversation_map_returns_a_normalized_sparse_digest(mcp_server):
         "constraints",
         "experiments",
         "tasks",
-        "between_ideas",
+        # §3.2 — `between_ideas` became `frames`.
+        "frames",
     }
-    assert all(
-        isinstance(result["digest"][key], list)
-        for key in (
-            "themes",
-            "recurring_ideas",
-            "open_questions",
-            "decisions",
-            "constraints",
-            "experiments",
-            "tasks",
-            "between_ideas",
-        )
-    )
-    assert len(result["digest"]["between_ideas"]) <= 3
+    assert result["workspace_id"] == workspace_id
+    assert set(result["digest"]) >= keys
+    assert "between_ideas" not in result["digest"]
+    assert all(isinstance(result["digest"][key], list) for key in keys)
+    assert len(result["digest"]["frames"]) <= 3
     assert srv.WORKSPACE_ID == browser_workspace_id
     assert srv.STORE.current_workspace_id() == browser_workspace_id
     assert srv.ENGINE.question == "B question"
 
 
-def test_conversation_map_preserves_digest_and_caps_secondary_connections(
-    monkeypatch,
-):
+def test_conversation_map_preserves_digest_and_caps_frames(monkeypatch):
+    """§3.2 — frames replace between_ideas; the truncation to 3 survives."""
     digest = {
         "themes": [{"name": "Reliability"}],
         "recurring_ideas": [{"canonical_id": "idea-1", "occurrence_count": 3}],
         "open_questions": [{"text": "What fails first?"}],
-        "between_ideas": [{"id": f"link-{index}"} for index in range(5)],
+        "frames": [{"id": f"frame-{index}"} for index in range(5)],
         "source_context_version": 7,
     }
     monkeypatch.setattr(
@@ -326,13 +317,30 @@ def test_conversation_map_preserves_digest_and_caps_secondary_connections(
     assert result["digest"]["themes"] == [{"name": "Reliability"}]
     assert result["digest"]["recurring_ideas"][0]["occurrence_count"] == 3
     assert result["digest"]["source_context_version"] == 7
-    assert [item["id"] for item in result["digest"]["between_ideas"]] == [
-        "link-0",
-        "link-1",
-        "link-2",
+    assert [item["id"] for item in result["digest"]["frames"]] == [
+        "frame-0",
+        "frame-1",
+        "frame-2",
     ]
     for key in ("decisions", "constraints", "experiments", "tasks"):
         assert result["digest"][key] == []
+
+
+def test_conversation_map_drops_a_legacy_between_ideas_key(monkeypatch):
+    """A stale snapshot must not smuggle machine connections back to agents."""
+    monkeypatch.setattr(
+        mcp_surface,
+        "_state_for",
+        lambda workspace_id: {
+            "workspace": {"id": workspace_id},
+            "digest": {"between_ideas": [{"id": "legacy-link"}]},
+        },
+    )
+
+    result = mcp_surface._conversation_map("ws-test")
+
+    assert "between_ideas" not in result["digest"]
+    assert result["digest"]["frames"] == []
 
 
 def test_birdz_reports_magpie_ready_on_the_same_http_server(mcp_server):

@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import mimetypes
 import os
 import re
+import struct
 import sys
 import threading
 import time
@@ -62,7 +64,23 @@ RUNTIME_DIR = _runtime_dir()
 STATE_PATH = RUNTIME_DIR / "state.json"
 DB_PATH = RUNTIME_DIR / "magpie.sqlite3"
 
-METABOLISM_PERIOD = 3.0
+# SPEC §2.2 — the metabolism is a structural inspector, not a generator.
+# 30.0s from 3.0s: the old cadence drained the pair space exhaustively, and
+# "10 contributions → 45 pairs → 45 cards was the loop working as written".
+METABOLISM_PERIOD = 30.0
+# No scan within 60s of the last human contribution: recognition waits for the
+# field to settle rather than racing the person typing into it.
+QUIESCENCE_WINDOW = 60.0
+# Fleet-wide LLM call budget across workspaces, per day.
+FLEET_CLICK_BUDGET_PER_DAY = 50
+# §2.2 anti-starvation: N new claims with zero scans forces one wave.
+STARVATION_CLAIMS = 10
+# §3.3/§7.3(c): 14 days without grounding flags a position in the brief.
+STALENESS_WINDOW = 14 * 24 * 3600.0
+
+EMBEDDING_MODEL = os.environ.get("MAGPIE_EMBEDDING_MODEL") or "magpie-default"
+EMBEDDING_VERSION = os.environ.get("MAGPIE_EMBEDDING_VERSION") or "v1"
+
 AUTO_CONNECTIONS = (
     os.environ.get("MAGPIE_AUTO_CONNECTIONS", "").strip().lower()
     in {"1", "true", "yes", "on"}
@@ -77,6 +95,12 @@ ENGINE: Any = None
 STORE: Storage | None = None
 WORKSPACE_ID: str | None = None
 _STOP = threading.Event()
+
+# §2.2 metabolism accounting. Touched only from the single metabolism thread
+# and from tests, so it needs no lock of its own.
+_FLEET_BUDGET_DAY: int = -1
+_FLEET_BUDGET_SPENT: int = 0
+_STARVATION_COUNTS: dict[str, int] = {}
 
 
 class ServiceUnavailable(RuntimeError):
@@ -131,13 +155,19 @@ def _persist_engine(
         _ensure_runtime()
         engine_mod.save(engine, str(STATE_PATH))
         return None
+    snapshot = engine.state()
     with STORE.transaction():
         workspace = STORE.save_workspace(
             workspace_id,
-            engine.state(),
+            snapshot,
             question=engine.question,
             increment_context=increment_context,
         )
+        # The snapshot stays authoritative; these are indices written in the
+        # same transaction so the index can never commit without the snapshot
+        # it indexes (§5).
+        STORE.sync_positions(workspace_id, snapshot)
+        STORE.sync_click_ledger(workspace_id, snapshot)
         if event_kind:
             STORE.append_event(
                 event_kind,
@@ -184,13 +214,63 @@ def _required_workspace_id(body: dict) -> str:
     return workspace_id
 
 
+def _export_class_for(
+    position: Any,
+    data: dict[str, Any],
+    *,
+    source: str,
+) -> str | None:
+    """SPEC §4 — which of the three export classes this card qualifies for.
+
+    Returning ``None`` means *never banked*.  This is the contamination fix:
+    the old ``_bank_card`` enqueued a Raven write for every card, so machine
+    fusions were written to shared memory and recalled back later. Only
+    human-rooted claims and human-confirmed frames leave the workspace.
+
+    ``position`` is the live engine :class:`~magpie.engine.Position`, not the
+    storage index row: banking runs before the snapshot is persisted, so the
+    index is a tick stale here and an eligibility gate must never read stale
+    structure.  The index exists to make the decision *inspectable* after the
+    fact (``outbox.export_class``), not to make it.
+    """
+    origin = getattr(position, "origin", None)
+    floor_kind = getattr(position, "floor_kind", "claim")
+    external = bool(getattr(position, "external", False))
+    confirmed_by = getattr(position, "confirmed_by", None)
+
+    # Recall-quarantined material is not ours to re-bank: writing it back would
+    # close the loop that made the field recall its own echo (§4).
+    if external:
+        return None
+    # A derived-ungrounded claim is structure awaiting evidence, not an
+    # assertion (§1.4); an unpromoted machine candidate is not material at all.
+    if origin in ("derivation", "recall"):
+        return None
+    if floor_kind == "frame":
+        # A fold stays workspace-local unless a human confirmed it (§1.6, §4).
+        return "human_curated_frame" if str(confirmed_by or "").strip() else None
+    if str(data.get("state")) in ("supported", "refuted") and str(
+        data.get("receipt") or ""
+    ).strip():
+        return "settled_claim"
+    if source == "atomize" and origin in (None, "human"):
+        return "human_root"
+    return None
+
+
 def _bank_card(
     workspace_id: str | None,
     card: Any,
     *,
     source: str,
+    engine: Any = None,
 ) -> Any | None:
     """Bank a card locally and queue its canonical Raven write.
+
+    The local idea-bank row is written for every card — it is workspace-local
+    provenance. The *Raven* write is gated on an export class (§4): machine
+    candidates, derived-ungrounded claims, and unpromoted folds are banked
+    locally and never queued outward.
 
     Raven delivery is intentionally asynchronous: the workspace stays usable
     if the private memory service is disabled or temporarily unavailable.
@@ -201,6 +281,12 @@ def _bank_card(
     text = str(data.get("text") or "").strip()
     if not text:
         return None
+    position = None
+    if engine is not None:
+        try:
+            position = engine.position(str(data.get("id") or ""))
+        except KeyError:
+            position = None
     idea, _created = STORE.upsert_idea(
         text,
         kind=str(data.get("artifact_type") or data.get("kind") or "claim"),
@@ -217,10 +303,14 @@ def _bank_card(
         metadata={"state": data.get("state"), "archived": data.get("archived", False)},
     )
     local_ref = str(data.get("id") or "").strip()
+    export_class = _export_class_for(position, data, source=source)
+    if export_class is None:
+        return idea
     STORE.enqueue_raven_remember(
         text,
+        export_class=export_class,
         workspace_id=workspace_id,
-        source="human" if source == "atomize" else None,
+        source="human" if export_class == "human_root" else None,
         tags=["magpie", f"workspace:{workspace_id}"],
         episode_id=workspace_id,
         dedupe_key=f"magpie-card:{workspace_id}:{local_ref or idea.id}",
@@ -573,7 +663,10 @@ def _run_atomize(text: str, workspace_id: str | None = None) -> None:
                 created_cards.append(card)
                 # Persistence errors intentionally escape: the outer transaction
                 # must roll back rather than commit a snapshot without its bank row.
-                _bank_card(target_workspace, card, source="atomize")
+                _bank_card(
+                    target_workspace, card, source="atomize",
+                    engine=target_engine,
+                )
             try:
                 target_engine.enforce_cap()
             except Exception:
@@ -593,20 +686,40 @@ def _run_atomize(text: str, workspace_id: str | None = None) -> None:
             )
 
 
-def _run_fuse(
-    child_id: str,
-    a: dict,
-    b: dict,
-    question: str,
+def _run_recognize(
+    a_id: str,
+    b_id: str,
     workspace_id: str | None = None,
-) -> None:
-    """Ask inference to rewrite a collide-child as an open proposal."""
+) -> dict[str, Any]:
+    """SPEC §2.2/§2.4 — ask about one pair; land a candidate or an attempt row.
+
+    This is the *only* place a recognition request is issued, shared by the
+    background scanner and the human-initiated ``propose_click``. It never
+    materializes field content: the sole possible outputs are a row in the
+    emergence inbox and a row in the never-retry ledger.
+
+    Runs OFF the lock while the provider is in flight, then re-resolves the
+    engine — a workspace switch or a competing tick may have landed in between,
+    and the pair must be re-validated against current state rather than the
+    state that motivated the ask.
+    """
     target_workspace = workspace_id if workspace_id is not None else WORKSPACE_ID
+    with LOCK:
+        target_engine, _is_current = _engine_for_workspace(target_workspace)
+        try:
+            a = _card_dict(target_engine._card(a_id))
+            b = _card_dict(target_engine._card(b_id))
+        except KeyError:
+            return {"click": False, "error": "unknown position"}
+        question = target_engine.question
+
     try:
-        out = workers.fuse(a, b, question)
+        out = workers.recognize(a, b, question)
     except Exception:
         traceback.print_exc()
-        out = None
+        # An unexpected worker crash is an outage, not a judgment about the
+        # pair: it must record `failed`, which does not consume it (§2.3).
+        out = {"click": False, "failed": True, "provenance": "recognizer crashed"}
 
     with LOCK:
         target_engine, _is_current = _engine_for_workspace(target_workspace)
@@ -616,88 +729,54 @@ def _run_fuse(
             else nullcontext()
         )
         with transaction:
-            card_to_bank = None
+            result: dict[str, Any]
+            event_kind = "click.no_click"
+            event_payload: dict[str, Any] = {"position_ids": [a_id, b_id]}
             try:
-                if out and out.get("ok") and out.get("text"):
-                    collision_kind = str(out.get("kind") or "SYNTHESIS").upper()
-                    card_kind = "synthesis" if collision_kind == "SYNTHESIS" else "claim"
-                    provenance = (
-                        out.get("provenance")
-                        # Compatibility with workers loaded during a rolling update.
-                        or out.get("receipt")
-                        or ""
-                    )
-                    card = target_engine.update_proposal(
-                        child_id,
-                        out.get("text"),
-                        kind=card_kind,
-                        foot=" · ".join(
-                            x for x in (collision_kind, str(provenance)) if x
-                        ),
-                    )
-                    card_to_bank = card
-                    event_kind = "proposal.created"
-                    event_payload = {
-                        "card_id": child_id,
-                        "parent_ids": [a.get("id"), b.get("id")],
-                        "collision_kind": collision_kind,
-                    }
+                if out.get("failed"):
+                    target_engine.record_attempt(a_id, b_id, "failed")
+                    result = {"click": False, "failed": True}
+                    event_kind = "click.failed"
+                elif not out.get("click"):
+                    target_engine.record_attempt(a_id, b_id, "no_click")
+                    result = {"click": False, "failed": False}
                 else:
-                    failure = (out or {}).get("provenance") or "fusion failed"
-                    target_engine.reopen(child_id, foot=str(failure))
-                    event_kind = "proposal.failed"
-                    event_payload = {"card_id": child_id, "error": str(failure)}
-                target_engine.enforce_cap()
-            except Exception:
+                    proposal = engine_mod.ClickProposal(
+                        abstraction=str(out.get("abstraction") or ""),
+                        specializer_a=str(out.get("specializer_a") or ""),
+                        specializer_b=str(out.get("specializer_b") or ""),
+                        scope_boundary=str(out.get("scope_boundary") or ""),
+                    )
+                    try:
+                        candidate = target_engine.propose_click(
+                            a_id, b_id, proposal
+                        )
+                    except engine_mod.GateFailure as exc:
+                        # propose_click already wrote the `gate_failed` row. A
+                        # failed gate is not a card: it emits nothing (§1.3).
+                        result = {
+                            "click": False,
+                            "gate_failed": exc.gate,
+                            "detail": str(exc),
+                        }
+                        event_kind = "click.gate_failed"
+                        event_payload["gate"] = exc.gate
+                    else:
+                        result = {"click": True, "candidate": candidate.to_dict()}
+                        event_kind = "click.proposed"
+                        event_payload["candidate_id"] = candidate.id
+            except Exception as exc:
                 traceback.print_exc()
-                event_kind = "proposal.failed"
-                event_payload = {"card_id": child_id, "error": "fusion application failed"}
-            if card_to_bank is not None:
-                # As with atomization, a bank failure aborts the whole DB commit.
-                _bank_card(target_workspace, card_to_bank, source="fusion")
+                result = {"click": False, "error": str(exc)}
+                event_kind = "click.failed"
+            event_payload["provenance"] = str(out.get("provenance") or "")
             _persist_engine(
                 target_workspace,
                 target_engine,
                 event_kind=event_kind,
                 event_payload=event_payload,
-                increment_context=True,
             )
-
-
-def _collide_and_fuse(
-    a_id: str, b_id: str, workspace_id: str | None = None
-) -> dict:
-    """Spawn the testing child under LOCK, then fuse in a background thread.
-
-    Caller MUST hold LOCK. Returns the child card dict.
-    """
-    target_workspace = workspace_id if workspace_id is not None else WORKSPACE_ID
-    target_engine, _is_current = _engine_for_workspace(target_workspace)
-    child = target_engine.collide(a_id, b_id)
-    snap = target_engine.state()
-    cards = snap.get("cards") or {}
-    if isinstance(cards, dict):
-        a = _card_dict(cards.get(a_id) or {})
-        b = _card_dict(cards.get(b_id) or {})
-    else:
-        by_id = {c.get("id"): c for c in cards if isinstance(c, dict)}
-        a = _card_dict(by_id.get(a_id) or {})
-        b = _card_dict(by_id.get(b_id) or {})
-    question = snap.get("question") or ""
-    cd = _card_dict(child)
-    target_engine.enforce_cap()
-    _persist_engine(
-        target_workspace,
-        target_engine,
-        event_kind="collision.started",
-        event_payload={"card_id": cd.get("id"), "parent_ids": [a_id, b_id]},
-    )
-    threading.Thread(
-        target=_run_fuse,
-        args=(cd.get("id"), a, b, question, target_workspace),
-        daemon=True,
-    ).start()
-    return cd
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -705,7 +784,156 @@ def _collide_and_fuse(
 # --------------------------------------------------------------------------
 
 
+def _embedding_ranker(workspace_id: str | None, engine: Any):
+    """Build the §2.2 cosine ranker over ``idea_embeddings``, or ``None``.
+
+    Embeddings are a **bounded ranking index only** — never an acceptance
+    threshold, never a materialization trigger. Returning ``None`` when no
+    vectors exist is deliberate: with no ranking signal every cosine reads 0.0,
+    which is below ``CLICK_FLOOR``, so the tick does nothing rather than
+    falling back to "rank by something else". Ranking absence must degrade to
+    silence, not to a different selection rule.
+    """
+    if STORE is None or workspace_id is None:
+        return None
+    vectors: dict[str, list[float]] = {}
+    try:
+        occurrences = STORE.list_workspace_ideas(workspace_id)
+    except Exception:
+        return None
+    for item in occurrences:
+        local_ref = str(item.get("local_ref") or "")
+        if not local_ref or local_ref in vectors:
+            continue
+        embedding = STORE.get_embedding(
+            item["idea"].id, model=EMBEDDING_MODEL, version=EMBEDDING_VERSION
+        )
+        if embedding is None:
+            continue
+        try:
+            values = list(
+                struct.unpack(f"<{embedding.dimensions}f", embedding.vector)
+            )
+        except struct.error:
+            continue
+        norm = math.sqrt(sum(v * v for v in values))
+        if norm <= 0.0:
+            continue
+        vectors[local_ref] = [v / norm for v in values]
+    if not vectors:
+        return None
+
+    def cosine(a_id: str, b_id: str) -> float:
+        va, vb = vectors.get(a_id), vectors.get(b_id)
+        if va is None or vb is None or len(va) != len(vb):
+            return 0.0
+        return sum(x * y for x, y in zip(va, vb))
+
+    return cosine
+
+
+def _fleet_budget_remaining() -> int:
+    """§2.2 — the fleet-wide daily cap on recognition spend across workspaces."""
+    global _FLEET_BUDGET_DAY, _FLEET_BUDGET_SPENT
+    day = int(time.time() // 86400)
+    if day != _FLEET_BUDGET_DAY:
+        _FLEET_BUDGET_DAY = day
+        _FLEET_BUDGET_SPENT = 0
+    return max(0, FLEET_CLICK_BUDGET_PER_DAY - _FLEET_BUDGET_SPENT)
+
+
+def _last_contribution_at(workspace_id: str | None, engine: Any) -> float:
+    """Most recent human input, for the §2.2 quiescence gate."""
+    stamps = [
+        p.occupant.last_seen
+        for p in engine.all_positions()
+        if p.origin == "human"
+    ]
+    return max(stamps) if stamps else 0.0
+
+
+def _inspect_workspace(workspace_id: str | None) -> dict[str, Any]:
+    """One structural-inspection tick for one workspace (§2.2).
+
+    The loop **materializes nothing**. It may do exactly three things: expire
+    stale click candidates, vacate frames that lost all their instances, and
+    select AT MOST ONE pair to ask a question about. Card generation is not in
+    its vocabulary — that is the whole point of the redesign, and the reason
+    there is no branch here that calls ``propose()``.
+
+    Returns a small report so the caller can spend the fleet budget honestly.
+    """
+    global _STARVATION_COUNTS
+    report: dict[str, Any] = {"scanned": False, "pair": None, "reason": ""}
+    with LOCK:
+        target_engine, _is_current = _engine_for_workspace(workspace_id)
+
+        # Structural upkeep — no inference, no new material, so it runs on
+        # every tick regardless of quiescence or budget.
+        expired = target_engine.expire_candidates()
+        vacated = target_engine.vacate_empty_frames()
+        if expired or vacated:
+            _persist_engine(
+                workspace_id,
+                target_engine,
+                event_kind="field.inspected",
+                event_payload={
+                    "expired_candidates": [c.id for c in expired],
+                    "vacated_frames": [p.id for p in vacated],
+                },
+            )
+        report["expired"] = len(expired)
+        report["vacated"] = len(vacated)
+
+        # Emission rate is governed by inbox capacity, not timer frequency
+        # (§2.2/§2.4): a fourth candidate is not generated until one resolves.
+        open_candidates = len(target_engine.open_candidates())
+        if open_candidates >= engine_mod.INBOX_CAP:
+            report["reason"] = "inbox full"
+            return report
+
+        # §2.2 anti-starvation: N new claims with zero scans forces exactly one
+        # wave, so budget exhaustion or a workspace that never goes quiet can
+        # never silently disable recognition forever.
+        claim_count = sum(
+            1 for p in target_engine.all_positions()
+            if p.floor_kind == "claim" and p.origin == "human"
+        )
+        seen = _STARVATION_COUNTS.get(workspace_id or "", 0)
+        starving = claim_count - seen >= STARVATION_CLAIMS
+
+        idle = time.time() - _last_contribution_at(workspace_id, target_engine)
+        if not starving and idle < QUIESCENCE_WINDOW:
+            report["reason"] = "field not quiescent"
+            return report
+        if _fleet_budget_remaining() <= 0:
+            report["reason"] = "fleet budget exhausted"
+            return report
+
+        pair = target_engine.scan_candidates(
+            _embedding_ranker(workspace_id, target_engine)
+        )
+        if pair is None:
+            report["reason"] = "no eligible pair above CLICK_FLOOR"
+            # A scan that legitimately found nothing still counts as a wave:
+            # otherwise a quiet field would re-trigger starvation forever.
+            _STARVATION_COUNTS[workspace_id or ""] = claim_count
+            return report
+        _STARVATION_COUNTS[workspace_id or ""] = claim_count
+        report["pair"] = pair
+    return report
+
+
 def _metabolism_loop() -> None:
+    """SPEC §2.2 — the background loop as a structural inspector.
+
+    Cadence 30s (from 3.0s), quiescence-gated, inbox-governed, fleet-budgeted.
+    Per tick, per workspace, it selects at most one pair and asks about it. The
+    old loop drained the pair space exhaustively at 3-second intervals and
+    materialized a card for every pair; nothing here can do that, because
+    ``_run_recognize`` cannot produce field material at all.
+    """
+    global _FLEET_BUDGET_SPENT
     while not _STOP.wait(METABOLISM_PERIOD):
         try:
             with LOCK:
@@ -714,11 +942,13 @@ def _metabolism_loop() -> None:
                     if STORE is not None
                     else [WORKSPACE_ID]
                 )
-                for workspace_id in workspace_ids:
-                    target_engine, _is_current = _engine_for_workspace(workspace_id)
-                    pair = target_engine.best_pair()
-                    if pair:
-                        _collide_and_fuse(pair[0], pair[1], workspace_id)
+            for workspace_id in workspace_ids:
+                report = _inspect_workspace(workspace_id)
+                pair = report.get("pair")
+                if not pair:
+                    continue
+                _FLEET_BUDGET_SPENT += 1
+                _run_recognize(pair[0], pair[1], workspace_id)
         except Exception:
             traceback.print_exc()
 
@@ -896,6 +1126,10 @@ def _recall_workspace(
         content = str(memory.get("content") or "").strip()
         if not memory_id or not content or memory_id in projections:
             continue
+        # §4 — the suppression registry and the durable dismissal list. Both
+        # are workspace-local and reversible; neither mutates Raven.
+        if STORE.recall_is_blocked(workspace_id, memory_id):
+            continue
         prior = existing.get(memory_id)
         if prior is not None and prior.status == "dismissed":
             continue
@@ -917,13 +1151,123 @@ def _recall_workspace(
     }
 
 
+def _adopt_one_position(
+    workspace_id: str,
+    engine: Any,
+    text: str,
+    *,
+    section: str | None,
+    foot: str,
+    supports: list[str] | None = None,
+) -> Any:
+    """Adopt one memory as a QUARANTINED position, deduped by fingerprint.
+
+    SPEC §4: everything adopted arrives ``external=True`` and
+    ``needs_human`` — excluded from the click scanner until a human pins it.
+    Recall can inform without breeding.
+
+    Dedupe is by ``idea_fingerprint`` onto an existing position rather than
+    minting a duplicate: the one job position ids cannot do alone
+    (Appendix B #2). Without it a re-adopted memory could mint a fresh position
+    and walk around the never-retry ledger.
+    """
+    clean = str(text or "").strip()
+    existing = (
+        STORE.find_position_by_fingerprint(workspace_id, clean)
+        if STORE is not None
+        else None
+    )
+    if existing is not None and existing.position_id in engine.positions:
+        return engine.position(existing.position_id).occupant
+    supports = [sid for sid in (supports or []) if sid in engine.positions]
+    card = engine.propose(
+        clean,
+        section=section,
+        state="needs_human",
+        foot=foot,
+        origin="recall",
+        external=True,
+        floor_kind="frame" if supports else "claim",
+        supports=supports or None,
+    )
+    return card
+
+
+def _adopt_raven_floor(
+    workspace_id: str,
+    engine: Any,
+    memory: dict[str, Any],
+) -> list[Any]:
+    """Reconstruct the floor of a banked ``human_curated_frame`` (§4, Delta 2).
+
+    A frame was banked with ``hints={"derived_from": [floor memory ids]}``, so
+    the ladder is recoverable: adopt those floor memories first as quarantined
+    claim positions, and the caller stands the frame on them with its support
+    edges intact. Recall arrives AT an altitude — never as loose extra ideas
+    dumped on one floor.
+
+    A floor member that cannot be fetched is simply absent; the frame then
+    stands on what was actually recovered rather than on a fabricated edge.
+    """
+    hints = dict(memory.get("hints") or {})
+    floor_ids = [
+        str(value).strip()
+        for value in (hints.get("derived_from") or [])
+        if str(value or "").strip()
+    ]
+    if not floor_ids:
+        return []
+    out: list[Any] = []
+    for floor_id in floor_ids:
+        if STORE is not None and STORE.recall_is_blocked(workspace_id, floor_id):
+            continue
+        node: dict[str, Any] = {}
+        fetched = RAVEN.get(floor_id, depth=0)
+        if fetched.ok:
+            node = dict((fetched.value or {}).get("node") or {})
+        floor_text = str(node.get("content") or "").strip()
+        if not floor_text:
+            continue
+        child = _adopt_one_position(
+            workspace_id,
+            engine,
+            floor_text,
+            section=None,
+            foot=f"Raven floor · {node.get('kind', 'memory')}",
+        )
+        position = engine.position(child.id)
+        # Grounding dates arrive intact: the floor's history is what makes the
+        # reconstructed sub-ladder honest rather than freshly minted (§4).
+        grounded = node.get("last_grounded_at") or node.get("created_at")
+        if grounded is not None:
+            try:
+                position.last_grounded_at = float(grounded)
+            except (TypeError, ValueError):
+                pass
+        if STORE is not None:
+            STORE.upsert_raven_projection(
+                workspace_id,
+                floor_id,
+                local_ref=child.id,
+                section=child.section,
+                mass=child.mass,
+                local_status="adopted",
+                metadata={"memory": node, "origin": "raven", "floor": True},
+            )
+        out.append(child)
+    return out
+
+
 def _adopt_raven_memory(
     workspace_id: str,
     memory_id: str,
     *,
     section: str | None = None,
 ) -> dict[str, Any]:
-    """Create an open local card for a Raven memory without re-remembering it."""
+    """Create a quarantined local sub-ladder for a Raven memory (§4).
+
+    Never re-remembers: adoption is inbound only.
+    """
     if STORE is None:
         raise RuntimeError("workspace storage is not initialized")
     memory_id = str(memory_id or "").strip()
@@ -977,7 +1321,12 @@ def _adopt_raven_memory(
                 section_key,
             )
         with STORE.transaction():
-            card = target_engine.propose(
+            floor_cards = _adopt_raven_floor(
+                workspace_id, target_engine, memory
+            )
+            card = _adopt_one_position(
+                workspace_id,
+                target_engine,
                 content,
                 section=section_key,
                 foot=(
@@ -985,6 +1334,7 @@ def _adopt_raven_memory(
                     f"{memory.get('state', 'open')} · "
                     f"{float(memory.get('effective_confidence') or 0):.2f}"
                 ),
+                supports=[child.id for child in floor_cards],
             )
             idea, _created = STORE.upsert_idea(
                 content,
@@ -1042,14 +1392,21 @@ def _dismiss_raven_memory(workspace_id: str, memory_id: str) -> dict[str, Any]:
         ),
         None,
     )
-    exposure = STORE.upsert_raven_exposure(
-        workspace_id,
-        memory_id,
-        status="dismissed",
-        reason="Dismissed from this workspace shelf",
-        context_version=STORE.load_workspace(workspace_id).context_version,
-        metadata={} if prior is None else prior.metadata,
-    )
+    with STORE.transaction():
+        exposure = STORE.upsert_raven_exposure(
+            workspace_id,
+            memory_id,
+            status="dismissed",
+            reason="Dismissed from this workspace shelf",
+            context_version=STORE.load_workspace(workspace_id).context_version,
+            metadata={} if prior is None else prior.metadata,
+        )
+        # §4 — durable by memory id, not just an exposure row recall rewrites:
+        # a human-dismissed exposure never resurfaces in this workspace,
+        # regardless of future recall scoring.
+        STORE.dismiss_memory(
+            workspace_id, memory_id, reason="dismissed from the workspace shelf"
+        )
     return {"workspace_id": workspace_id, "exposure": _raven_exposure_dict(exposure)}
 
 
@@ -1236,14 +1593,311 @@ def _api_propose(body: dict) -> dict:
     }
 
 
-def _api_collide(body: dict) -> dict:
+def _position_dict(engine: Any, position: Any) -> dict[str, Any]:
+    """One position on the wire, with everything derived actually derived.
+
+    ``altitude`` and ``support`` are recomputed here on every call rather than
+    read from the position (§1.5): the wire format is a projection of the
+    floor, so no client can ever be handed a support figure the floor does not
+    currently justify.
+    """
+    out = position.to_dict()
+    out["altitude"] = engine.altitude(position.id)
+    out["lineage_mass"] = engine.lineage_mass(position.id)
+    out["staleness"] = engine.staleness(position.id)
+    if position.floor_kind == "frame":
+        out["support"] = engine.frame_support(position.id)
+        out["instance_count"] = sum(
+            1 for sid in position.supports
+            if sid in engine.positions
+            and engine.positions[sid].folded_under == position.id
+        )
+        out["ungrounded_slots"] = [
+            slot.id for slot in engine.ungrounded_slots(position.id)
+        ]
+    else:
+        out["support_state"] = position.support_state
+        out["receipt"] = position.receipt
+    return out
+
+
+def _api_field(body: dict) -> dict:
+    """§3.1/§3.2 — the field at one altitude, defaulting to the top."""
     workspace_id = _required_workspace_id(body)
-    a, b = body.get("a"), body.get("b")
+    raw_altitude = body.get("altitude")
+    with LOCK:
+        target_engine, _is_current = _engine_for_workspace(workspace_id)
+        alts = target_engine.altitudes()
+        max_altitude = max(alts.values()) if alts else 0
+        altitude = (
+            max_altitude if raw_altitude is None else max(0, int(raw_altitude))
+        )
+        positions = [
+            _position_dict(target_engine, p)
+            for p in target_engine.live_positions(altitude)
+        ]
+    return {
+        "workspace_id": workspace_id,
+        "altitude": altitude,
+        "max_altitude": max_altitude,
+        "positions": positions,
+    }
+
+
+def _api_descend(body: dict) -> dict:
+    """§3.1/§3.2 — the frame's floor, folded instances included."""
+    workspace_id = _required_workspace_id(body)
+    position_id = str(body.get("position_id") or body.get("id") or "").strip()
+    if not position_id:
+        raise ValueError("position_id required")
+    with LOCK:
+        target_engine, _is_current = _engine_for_workspace(workspace_id)
+        frame = target_engine.position(position_id)
+        floor = [
+            _position_dict(target_engine, child)
+            for child in target_engine.descend(position_id)
+        ]
+        header = _position_dict(target_engine, frame)
+    return {"workspace_id": workspace_id, "frame": header, "floor": floor}
+
+
+def _api_propose_click(body: dict) -> dict:
+    """§2.1/§2.4 — the human-initiated recognition request.
+
+    This is what ``/api/collide`` became. The difference is the whole thesis:
+    the old endpoint created a card in the field and then asked a model to
+    write it; this one asks a question whose only possible destinations are the
+    emergence inbox and the never-retry ledger.
+    """
+    workspace_id = _required_workspace_id(body)
+    a = str(body.get("a") or "").strip()
+    b = str(body.get("b") or "").strip()
+    if not a or not b:
+        raise ValueError("a and b required")
+    if a == b:
+        raise ValueError("a and b must identify different positions")
+    with LOCK:
+        target_engine, _is_current = _engine_for_workspace(workspace_id)
+        target_engine.position(a)
+        target_engine.position(b)
+        if target_engine.pair_consumed(a, b):
+            raise ValueError("pair already attempted; use reconsider_pair")
+        if len(target_engine.open_candidates()) >= engine_mod.INBOX_CAP:
+            raise ValueError("emergence inbox is full")
+    result = _run_recognize(a, b, workspace_id)
+    return {"workspace_id": workspace_id, **result}
+
+
+def _api_pending_clicks(body: dict) -> dict:
+    """§2.4/§7.2 — the emergence inbox, plus near-miss drilldown on request."""
+    workspace_id = _required_workspace_id(body)
+    include_rejected = bool(body.get("include_rejected"))
+    with LOCK:
+        target_engine, _is_current = _engine_for_workspace(workspace_id)
+        candidates = [c.to_dict() for c in target_engine.open_candidates()]
+        for candidate in candidates:
+            candidate["instances"] = [
+                _card_dict(target_engine._card(candidate["position_a"])),
+                _card_dict(target_engine._card(candidate["position_b"])),
+            ]
+        out: dict[str, Any] = {
+            "workspace_id": workspace_id,
+            "candidates": candidates,
+            "capacity": engine_mod.INBOX_CAP,
+            "click_budget_remaining": target_engine.click_budget_remaining(),
+        }
+        if include_rejected:
+            # Near-misses are private metrics with an operator inspection
+            # surface (Appendix B #4) — never field spam.
+            out["rejected"] = [
+                dict(row) for row in target_engine.click_attempts.values()
+                if row["outcome"] in ("gate_failed", "no_click", "declined",
+                                      "expired", "failed")
+            ]
+        _persist_engine(workspace_id, target_engine)
+    return out
+
+
+def _api_resolve_click(body: dict) -> dict:
+    """§2.4 — accept / accept-with-edit / decline one inbox candidate."""
+    workspace_id = _required_workspace_id(body)
+    candidate_id = str(body.get("candidate_id") or "").strip()
+    verdict = str(body.get("verdict") or "").strip().lower()
+    if not candidate_id:
+        raise ValueError("candidate_id required")
+    if verdict not in ("accept", "decline"):
+        raise ValueError("verdict must be accept or decline")
+    confirmed_by = str(body.get("confirmed_by") or "").strip()
+    if verdict == "accept" and not confirmed_by:
+        # A click is confirmed by a human or not at all (§1.6): the
+        # confirmation is provenance, and unattributed provenance is none.
+        raise ValueError("confirmed_by required to accept a click")
+    text = body.get("text")
+    with LOCK:
+        target_engine, _is_current = _engine_for_workspace(workspace_id)
+        transaction = (
+            STORE.transaction()
+            if STORE is not None and workspace_id is not None
+            else nullcontext()
+        )
+        with transaction:
+            if verdict == "decline":
+                candidate = target_engine.decline_click(candidate_id)
+                payload: dict[str, Any] = {"candidate": candidate.to_dict()}
+                event_kind = "click.declined"
+            else:
+                frame = target_engine.confirm_click(
+                    candidate_id,
+                    confirmed_by=confirmed_by,
+                    text=str(text).strip() if text else None,
+                )
+                payload = {
+                    "frame": _position_dict(target_engine, frame),
+                    "folded": [
+                        sid for sid in frame.supports
+                        if target_engine.positions[sid].folded_under == frame.id
+                    ],
+                }
+                event_kind = "click.confirmed"
+                # A confirmed fold is the one machine-adjacent artifact a human
+                # signed, so it is the one that may leave the workspace (§4).
+                _bank_card(
+                    workspace_id,
+                    frame.occupant,
+                    source="click",
+                    engine=target_engine,
+                )
+            target_engine.enforce_cap()
+            _persist_engine(
+                workspace_id,
+                target_engine,
+                event_kind=event_kind,
+                event_payload={
+                    "candidate_id": candidate_id,
+                    "confirmed_by": confirmed_by or None,
+                },
+                increment_context=True,
+            )
+    return {"workspace_id": workspace_id, **payload}
+
+
+def _api_reconsider_pair(body: dict) -> dict:
+    """§2.3 — the deliberate, provenance-visible retry door."""
+    workspace_id = _required_workspace_id(body)
+    a = str(body.get("a") or "").strip()
+    b = str(body.get("b") or "").strip()
     if not a or not b:
         raise ValueError("a and b required")
     with LOCK:
-        child = _collide_and_fuse(a, b, workspace_id)
-    return {"card": child}
+        target_engine, _is_current = _engine_for_workspace(workspace_id)
+        row = target_engine.reconsider_pair(a, b)
+        _persist_engine(
+            workspace_id,
+            target_engine,
+            event_kind="click.reconsidered",
+            event_payload={"position_ids": [a, b],
+                           "operation_version": row["operation_version"]},
+            increment_context=True,
+        )
+    return {"workspace_id": workspace_id, "attempt": row}
+
+
+def _api_unfold(body: dict) -> dict:
+    """§1.6 — always cheap: instances return, the frame position is vacated."""
+    workspace_id = _required_workspace_id(body)
+    frame_id = str(body.get("frame_id") or body.get("id") or "").strip()
+    if not frame_id:
+        raise ValueError("frame_id required")
+    with LOCK:
+        target_engine, _is_current = _engine_for_workspace(workspace_id)
+        released = target_engine.unfold(frame_id)
+        _persist_engine(
+            workspace_id,
+            target_engine,
+            event_kind="frame.unfolded",
+            event_payload={
+                "frame_id": frame_id,
+                "released": [p.id for p in released],
+            },
+            increment_context=True,
+        )
+        out = [_position_dict(target_engine, p) for p in released]
+    return {"workspace_id": workspace_id, "frame_id": frame_id, "released": out}
+
+
+def _run_derive(frame_id: str, workspace_id: str | None = None) -> dict[str, Any]:
+    """§1.4 — the explicit downward operator, off the request thread.
+
+    NEVER background-initiated: there is no call to this from
+    ``_metabolism_loop``, and adding one would be the "background-initiated
+    derivation" the spec excludes by design.
+    """
+    target_workspace = workspace_id if workspace_id is not None else WORKSPACE_ID
+    with LOCK:
+        target_engine, _is_current = _engine_for_workspace(target_workspace)
+        frame = target_engine.position(frame_id)
+        if frame.floor_kind != "frame":
+            raise ValueError("derive applies to frames only")
+        frame_card = _card_dict(frame.occupant)
+        question = target_engine.question
+
+    try:
+        out = workers.derive(frame_card, question)
+    except Exception:
+        traceback.print_exc()
+        out = {"ok": False, "claims": [], "provenance": "derivation crashed"}
+
+    with LOCK:
+        target_engine, _is_current = _engine_for_workspace(target_workspace)
+        transaction = (
+            STORE.transaction()
+            if STORE is not None and target_workspace is not None
+            else nullcontext()
+        )
+        with transaction:
+            created: list[Any] = []
+            if out.get("ok") and out.get("claims"):
+                created = target_engine.derive(frame_id, list(out["claims"]))
+                for card in created:
+                    # Derived-ungrounded claims are bank-ineligible (§1.4/§4);
+                    # `_bank_card` refuses them by origin. The call stays so the
+                    # local idea-bank row (workspace-local provenance) is
+                    # written for every position the same way.
+                    _bank_card(
+                        target_workspace, card, source="derivation",
+                        engine=target_engine,
+                    )
+            target_engine.enforce_cap()
+            _persist_engine(
+                target_workspace,
+                target_engine,
+                event_kind="frame.derived" if created else "derivation.empty",
+                event_payload={
+                    "frame_id": frame_id,
+                    "card_ids": [card.id for card in created],
+                    "provenance": str(out.get("provenance") or ""),
+                },
+                increment_context=True,
+            )
+            slots = [
+                _position_dict(target_engine, slot)
+                for slot in target_engine.ungrounded_slots(frame_id)
+            ]
+    return {
+        "workspace_id": target_workspace,
+        "frame_id": frame_id,
+        "created": [_card_dict(card) for card in created],
+        "ungrounded_slots": slots,
+        "provenance": str(out.get("provenance") or ""),
+    }
+
+
+def _api_derive(body: dict) -> dict:
+    workspace_id = _required_workspace_id(body)
+    frame_id = str(body.get("frame_id") or body.get("id") or "").strip()
+    if not frame_id:
+        raise ValueError("frame_id required")
+    return _run_derive(frame_id, workspace_id)
 
 
 def _api_verify(body: dict) -> dict:
@@ -1427,15 +2081,27 @@ def _api_section_rename(body: dict) -> dict:
 
 
 def _api_harvest(body: dict) -> dict:
+    """§3.3 — the decision-ready brief, not a dump.
+
+    ``altitude`` selects the spine's floor; ``None`` means "everything from
+    floor 0 up", which is still capped per section. Full state remains at
+    ``/api/state``, a debugging surface rather than a deliverable.
+    """
     workspace_id = _required_workspace_id(body)
+    raw_altitude = body.get("altitude")
+    altitude = None if raw_altitude is None else max(0, int(raw_altitude))
+    max_items = int(body.get("max_items") or 12)
     with LOCK:
         target_engine, _is_current = _engine_for_workspace(workspace_id)
-        brief = target_engine.harvest()
+        brief = target_engine.harvest(altitude=altitude, max_items=max_items)
         _persist_engine(
             workspace_id,
             target_engine,
             event_kind="workspace.harvested",
-            event_payload={"cards": len(brief.get("cards") or [])},
+            event_payload={
+                "altitude": brief.get("altitude"),
+                "spine": len(brief.get("spine") or []),
+            },
         )
     _ensure_runtime()
     path = RUNTIME_DIR / f"harvest-{workspace_id}-{int(time.time())}.json"
@@ -1522,7 +2188,18 @@ ROUTES: dict[str, Callable[[dict], dict]] = {
     "/api/workspaces/open": _api_workspace_open,
     "/api/seed": _api_seed,
     "/api/propose": _api_propose,
-    "/api/collide": _api_collide,
+    # §2.1: `/api/collide` becomes `propose_click` — a human-initiated request
+    # for the same recognition attempt, landing in the same inbox, never in
+    # the field. The old route is gone rather than aliased: an alias would be
+    # the second channel the spec excludes by design.
+    "/api/click/propose": _api_propose_click,
+    "/api/click/pending": _api_pending_clicks,
+    "/api/click/resolve": _api_resolve_click,
+    "/api/click/reconsider": _api_reconsider_pair,
+    "/api/derive": _api_derive,
+    "/api/field": _api_field,
+    "/api/descend": _api_descend,
+    "/api/unfold": _api_unfold,
     "/api/verify": _api_verify,
     "/api/judge": _api_judge,
     "/api/keep": _api_keep,

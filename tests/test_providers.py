@@ -372,6 +372,66 @@ def test_stub_shapes_worker_schema_without_echoing_instructions():
     assert "Split this thought" not in output["claims"][0]["text"]
 
 
+def test_stub_echoes_the_json_prompt_body_atomize_actually_sends():
+    """`atomize()` sends INPUT: {json}, not a `LABEL:` line.
+
+    The stub is a *deterministic* double, which means distinct inputs must
+    produce distinct outputs. When it could not find the payload it fell back
+    to echoing the prompt preamble — identical for every thought — so every
+    offline contribution atomized to the same text and collapsed onto one
+    card. That made the offline scenario unable to hold two positions at once,
+    and therefore unable to exercise anything about the ladder.
+    """
+    schema = {
+        "type": "object",
+        "required": ["claims"],
+        "properties": {
+            "claims": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["text"],
+                    "properties": {"text": {"type": "string"}},
+                },
+            },
+        },
+    }
+    stub = StubProvider()
+
+    def atomize_prompt(thought):
+        return (
+            "Extract one or at most two useful artifacts.\n"
+            "INPUT:\n"
+            + json.dumps({"thought": thought, "sections": [],
+                          "canonical_candidates": []})
+        )
+
+    first = stub.complete(atomize_prompt("coffee cools quickly"), schema=schema)
+    second = stub.complete(atomize_prompt("kettles boil slowly"), schema=schema)
+
+    assert "coffee cools quickly" in first["claims"][0]["text"]
+    assert "kettles boil slowly" in second["claims"][0]["text"]
+    assert first != second
+    assert "Extract one or at most two" not in first["claims"][0]["text"]
+
+
+def test_stub_still_answers_no_click_for_every_recognition():
+    """§2.2 — the stub must not become a source of fabricated recognitions.
+
+    Making the stub echo its input is a fixture repair; making it *click*
+    would be a second channel into the field. `click` is a boolean, and the
+    stub answers every boolean False, so no offline run can ever mint a frame.
+    """
+    from magpie.workers import _RECOGNIZE_SCHEMA
+
+    result = StubProvider().complete(
+        "OPEN QUESTION: q\nCLAIM A: alpha\nCLAIM B: beta",
+        schema=_RECOGNIZE_SCHEMA,
+    )
+
+    assert result["click"] is False
+
+
 def test_stub_honors_enum_number_boolean_and_null():
     schema = {
         "type": "object",

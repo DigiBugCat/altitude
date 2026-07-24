@@ -4,11 +4,22 @@ The CLI deliberately talks to the public JSON API instead of importing the
 engine.  A CLI-driven scenario therefore exercises the same boundary as the
 browser and can also target a remote or deployed Magpie instance.
 
+The ladder (SPEC §1–§3) is reachable the same way. Note what is NOT here:
+there is no command that mints a frame directly. The only routes upward are
+the emergence inbox (`propose-click` → `inbox` → `confirm-click`) and
+recall adoption, exactly as over MCP.
+
 Examples:
 
     python3 -m magpie.cli state
     python3 -m magpie.cli seed "What would make this idea work?"
     python3 -m magpie.cli propose "The smallest useful loop is deterministic."
+    python3 -m magpie.cli positions --altitude 0
+    python3 -m magpie.cli propose-click c1 c2
+    python3 -m magpie.cli inbox --include-rejected
+    python3 -m magpie.cli confirm-click cand1 andrew
+    python3 -m magpie.cli derive c7
+    python3 -m magpie.cli harvest --altitude 1
     python3 -m magpie.cli scenario scenarios/smoke.json
     python3 -m magpie.cli run scenarios/smoke.json
 """
@@ -33,7 +44,16 @@ DEFAULT_URL = "http://127.0.0.1:7351"
 ACTIONS = (
     "seed",
     "propose",
-    "collide",
+    # §2.1: `collide` is gone, not aliased. `click/propose` asks the same
+    # question and can only reach the emergence inbox.
+    "click/propose",
+    "click/pending",
+    "click/resolve",
+    "click/reconsider",
+    "derive",
+    "field",
+    "descend",
+    "unfold",
     "verify",
     "judge",
     "keep",
@@ -45,6 +65,25 @@ ACTIONS = (
     "recall/adopt",
     "recall/dismiss",
 )
+
+
+# Subcommands whose readable name differs from their API path.
+#
+# `confirm-click` / `decline-click` are readable spellings of one verdict on
+# `resolve-click`, not a second door: they post to the same endpoint, which
+# still refuses an acceptance without `confirmed_by` (§1.6). There is no CLI
+# path to a frame that does not pass through the emergence inbox.
+_COMMAND_ACTIONS = {
+    "adopt-memory": "recall/adopt",
+    "dismiss-memory": "recall/dismiss",
+    "propose-click": "click/propose",
+    "pending-clicks": "click/pending",
+    "inbox": "click/pending",
+    "resolve-click": "click/resolve",
+    "confirm-click": "click/resolve",
+    "decline-click": "click/resolve",
+    "reconsider-pair": "click/reconsider",
+}
 
 
 class CliError(RuntimeError):
@@ -158,10 +197,68 @@ def _live_cards(state: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+# §1.6 — a folded instance is hidden at the frame's altitude, NOT gone:
+# "fully present on descent. Never archived." Treating `folded` as absent
+# would make a fold look like the deleted fuse()'s consumption, and would
+# also empty out the floor a frame's support is computed from. `vacated` and
+# `retired` rows are history: §1.2 keeps them forever, but they do not stand.
+_STANDING_STATUSES = ("live", "folded")
+
+
+def _live_positions(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Positions still standing — §1.2 keeps vacated/retired rows forever."""
+    raw = state.get("positions") or []
+    rows = list(raw.values()) if isinstance(raw, dict) else list(raw)
+    return [
+        row
+        for row in rows
+        if isinstance(row, dict) and row.get("status") in _STANDING_STATUSES
+    ]
+
+
+def _altitudes(positions: list[dict[str, Any]]) -> dict[str, int]:
+    """§1.2/§1.5 — altitude is DERIVED here too, never read off the wire.
+
+    ``Position.to_dict()`` deliberately ships no ``altitude`` key, so a
+    scenario metric cannot accidentally assert a stored figure that has
+    drifted from the floor. The walk is the same one the engine memoizes:
+    a claim is 0, a frame is ``1 + max(floor)``. Nothing at any layer may
+    drift from the layer below, and that includes this layer.
+    """
+    by_id = {str(row.get("id")): row for row in positions if row.get("id")}
+    memo: dict[str, int] = {}
+
+    def walk(pid: str, seen: frozenset[str]) -> int:
+        if pid in memo:
+            return memo[pid]
+        row = by_id.get(pid)
+        if row is None or row.get("floor_kind") != "frame":
+            memo[pid] = 0
+            return 0
+        supports = [str(s) for s in (row.get("supports") or [])]
+        if not supports or pid in seen:
+            memo[pid] = 0
+            return 0
+        below = seen | {pid}
+        height = 1 + max((walk(sid, below) for sid in supports), default=-1)
+        memo[pid] = height
+        return height
+
+    return {pid: walk(pid, frozenset()) for pid in by_id}
+
+
 def state_value(state: dict[str, Any], path: str) -> Any:
     """Resolve stable scenario metrics and simple dotted state paths."""
 
     cards = _live_cards(state)
+    positions = _live_positions(state)
+    altitudes = _altitudes(positions)
+    candidates = [
+        row for row in (state.get("click_candidates") or []) if isinstance(row, dict)
+    ]
+    attempts = [
+        row for row in (state.get("click_attempts") or []) if isinstance(row, dict)
+    ]
     metrics = {
         "cards.count": len(cards),
         "cards.testing": sum(card.get("state") == "testing" for card in cards),
@@ -171,6 +268,36 @@ def state_value(state: dict[str, Any], path: str) -> Any:
         "cards.open": sum(
             card.get("state") in ("open", "needs_human") for card in cards
         ),
+        # §1.2 — the ladder is the tracked object, so the scenario vocabulary
+        # counts positions, not just their current occupants.
+        "positions.count": len(positions),
+        "positions.claims": sum(
+            row.get("floor_kind") == "claim" for row in positions
+        ),
+        "positions.frames": sum(
+            row.get("floor_kind") == "frame" for row in positions
+        ),
+        "positions.folded": sum(bool(row.get("folded_under")) for row in positions),
+        "positions.external": sum(bool(row.get("external")) for row in positions),
+        "positions.grounded": sum(
+            row.get("last_grounded_at") is not None for row in positions
+        ),
+        # `floors` is the height of the ladder: one more than the top
+        # altitude, so a field of bare claims has exactly one floor.
+        "floors.count": (max(altitudes.values()) + 1) if altitudes else 0,
+        "floors.max_altitude": max(altitudes.values()) if altitudes else 0,
+        # §2.4 — the emergence inbox, capped at 3 open per workspace.
+        "inbox.count": sum(row.get("status") == "open" for row in candidates),
+        "inbox.accepted": sum(row.get("status") == "accepted" for row in candidates),
+        "inbox.declined": sum(row.get("status") == "declined" for row in candidates),
+        # §2.3 — the never-retry ledger. `attempts.consumed` excludes the
+        # non-consuming `failed` row a provider outage writes.
+        "attempts.count": len(attempts),
+        "attempts.consumed": sum(
+            row.get("outcome") not in ("failed", "reconsidered") for row in attempts
+        ),
+        "clicks.confirmed": int(state.get("clicks_confirmed") or 0),
+        "contributions.count": int(state.get("human_contributions") or 0),
         "ledger.count": len(state.get("ledger") or []),
         "providers.count": len(state.get("providers") or []),
     }
@@ -186,7 +313,11 @@ def state_value(state: dict[str, Any], path: str) -> Any:
 
 
 def _resolve_card_refs(value: Any, client: Client) -> Any:
-    """Resolve ``@card:N`` values to the Nth live card id."""
+    """Resolve ``@card:N`` and ``@position:N`` to the Nth live id.
+
+    ``@frame:N`` indexes only frame positions, which is what the ladder
+    operations (`derive`, `descend`, `unfold`) actually take.
+    """
 
     if isinstance(value, str) and value.startswith("@card:"):
         try:
@@ -195,6 +326,16 @@ def _resolve_card_refs(value: Any, client: Client) -> Any:
             return card["id"]
         except (ValueError, IndexError, KeyError) as exc:
             raise CliError(f"cannot resolve card reference {value!r}") from exc
+    if isinstance(value, str) and value.startswith(("@position:", "@frame:")):
+        prefix, _, raw_index = value.partition(":")
+        try:
+            index = int(raw_index)
+            rows = _live_positions(client.get_state())
+            if prefix == "@frame":
+                rows = [row for row in rows if row.get("floor_kind") == "frame"]
+            return rows[index]["id"]
+        except (ValueError, IndexError, KeyError) as exc:
+            raise CliError(f"cannot resolve position reference {value!r}") from exc
     if isinstance(value, dict):
         return {key: _resolve_card_refs(item, client) for key, item in value.items()}
     if isinstance(value, list):
@@ -305,6 +446,75 @@ def load_scenario(path: str | Path) -> dict[str, Any]:
     if not isinstance(document, dict):
         raise CliError("scenario root must be a JSON object")
     return document
+
+
+def positions_view(
+    state: dict[str, Any],
+    *,
+    altitude: int | None = None,
+    include_folded: bool = False,
+) -> dict[str, Any]:
+    """§1.2/§3.1 — the ladder, projected from state, nothing stored read back.
+
+    Altitude and a frame's support summary are both recomputed here from the
+    floor (§1.5). A frame's support is a tally of its floor's states — this
+    view will never print a support figure the floor does not currently
+    justify, because it has no other place to get one from.
+    """
+    rows = _live_positions(state)
+    altitudes = _altitudes(rows)
+    by_id = {str(row.get("id")): row for row in rows if row.get("id")}
+
+    def support_summary(row: dict[str, Any]) -> dict[str, int]:
+        tally = {"supported": 0, "refuted": 0, "open": 0}
+        for sid in row.get("supports") or []:
+            child = by_id.get(str(sid))
+            if child is None:
+                continue
+            state_name = ((child.get("occupant") or {}).get("state")) or "open"
+            if state_name in tally:
+                tally[state_name] += 1
+            else:
+                tally["open"] += 1
+        return tally
+
+    out = []
+    for row in rows:
+        pid = str(row.get("id"))
+        if not include_folded and row.get("folded_under"):
+            continue
+        height = altitudes.get(pid, 0)
+        if altitude is not None and height != altitude:
+            continue
+        occupant = row.get("occupant") or {}
+        entry: dict[str, Any] = {
+            "id": pid,
+            "altitude": height,
+            "floor_kind": row.get("floor_kind"),
+            "origin": row.get("origin"),
+            "text": occupant.get("text", ""),
+            "artifact_type": occupant.get("artifact_type"),
+            "supports": list(row.get("supports") or []),
+            "folded_under": row.get("folded_under"),
+            "last_grounded_at": row.get("last_grounded_at"),
+            "external": bool(row.get("external")),
+        }
+        if row.get("floor_kind") == "frame":
+            # A frame is never directly supported or refuted (§1.1); it has
+            # no receipt to report, only the floor's tally.
+            entry["support"] = support_summary(row)
+        else:
+            entry["support_state"] = occupant.get("state")
+            entry["receipt"] = occupant.get("receipt")
+        out.append(entry)
+
+    out.sort(key=lambda entry: (-entry["altitude"], entry["id"]))
+    return {
+        "altitude": altitude,
+        "max_altitude": max(altitudes.values()) if altitudes else 0,
+        "floors": (max(altitudes.values()) + 1) if altitudes else 0,
+        "positions": out,
+    }
 
 
 def _write_json(stream: TextIO, value: Any) -> None:
@@ -419,9 +629,64 @@ def _parser() -> argparse.ArgumentParser:
     seed.add_argument("question")
     propose = sub.add_parser("propose", help="queue a thought for atomization")
     propose.add_argument("text")
-    collide = sub.add_parser("collide", help="collide two card ids")
-    collide.add_argument("a")
-    collide.add_argument("b")
+    propose_click = sub.add_parser(
+        "propose-click", help="ask whether two positions are one frame"
+    )
+    propose_click.add_argument("a")
+    propose_click.add_argument("b")
+    for inbox_name, inbox_help in (
+        ("pending-clicks", "list open emergence-inbox candidates"),
+        ("inbox", "the emergence inbox (alias of pending-clicks)"),
+    ):
+        pending = sub.add_parser(inbox_name, help=inbox_help)
+        pending.add_argument(
+            "--include-rejected",
+            action="store_true",
+            help="also show near-misses: which gate each rejected pair failed",
+        )
+    resolve_click = sub.add_parser(
+        "resolve-click", help="accept or decline one inbox candidate"
+    )
+    resolve_click.add_argument("candidate_id")
+    resolve_click.add_argument("verdict", choices=("accept", "decline"))
+    resolve_click.add_argument("--confirmed-by")
+    resolve_click.add_argument("--text")
+    confirm_click = sub.add_parser(
+        "confirm-click", help="accept one candidate and execute the fold"
+    )
+    confirm_click.add_argument("candidate_id")
+    # Not optional: a click is confirmed by a human or not at all (§1.6), and
+    # the server rejects an acceptance without it either way.
+    confirm_click.add_argument("confirmed_by")
+    confirm_click.add_argument(
+        "--text", help="accept with edit: this wording becomes the occupant"
+    )
+    decline_click = sub.add_parser(
+        "decline-click", help="decline one candidate, writing a `declined` row"
+    )
+    decline_click.add_argument("candidate_id")
+    reconsider = sub.add_parser(
+        "reconsider-pair", help="deliberately reopen a settled non-click"
+    )
+    reconsider.add_argument("a")
+    reconsider.add_argument("b")
+    derive = sub.add_parser("derive", help="propose grounding claims for a frame")
+    derive.add_argument("frame_id")
+    field = sub.add_parser("field", help="read one altitude of the ladder")
+    field.add_argument("--altitude", type=int)
+    positions = sub.add_parser(
+        "positions", help="the whole ladder as durable positions, by altitude"
+    )
+    positions.add_argument("--altitude", type=int, help="only this floor")
+    positions.add_argument(
+        "--include-folded",
+        action="store_true",
+        help="show instances hidden under a frame (§1.6)",
+    )
+    descend = sub.add_parser("descend", help="read the floor beneath a frame")
+    descend.add_argument("position_id")
+    unfold = sub.add_parser("unfold", help="release a frame's instances")
+    unfold.add_argument("frame_id")
     verify = sub.add_parser("verify", help="submit a card to the verification hook")
     verify.add_argument("id")
     judge = sub.add_parser("judge", help="record a human judgment")
@@ -440,7 +705,9 @@ def _parser() -> argparse.ArgumentParser:
     section.add_argument("name")
     section.add_argument("--key")
     section.add_argument("--color", default="#c9b8a0")
-    sub.add_parser("harvest", help="write and print a harvest")
+    harvest = sub.add_parser("harvest", help="write and print a harvest brief")
+    harvest.add_argument("--altitude", type=int)
+    harvest.add_argument("--max-items", type=int, default=12)
     recall = sub.add_parser("recall", help="recall Raven memories through Magpie")
     recall.add_argument("query", nargs="?")
     recall.add_argument("--workspace-id")
@@ -474,8 +741,36 @@ def _payload(args: argparse.Namespace) -> dict[str, Any]:
         return {"question": args.question}
     if args.command == "propose":
         return {"text": args.text}
-    if args.command == "collide":
+    if args.command in ("propose-click", "reconsider-pair"):
         return {"a": args.a, "b": args.b}
+    if args.command in ("pending-clicks", "inbox"):
+        return {"include_rejected": bool(args.include_rejected)}
+    if args.command == "resolve-click":
+        payload = {"candidate_id": args.candidate_id, "verdict": args.verdict}
+        if args.confirmed_by:
+            payload["confirmed_by"] = args.confirmed_by
+        if args.text:
+            payload["text"] = args.text
+        return payload
+    if args.command == "confirm-click":
+        payload = {
+            "candidate_id": args.candidate_id,
+            "verdict": "accept",
+            "confirmed_by": args.confirmed_by,
+        }
+        if args.text:
+            payload["text"] = args.text
+        return payload
+    if args.command == "decline-click":
+        return {"candidate_id": args.candidate_id, "verdict": "decline"}
+    if args.command in ("derive", "unfold"):
+        return {"frame_id": args.frame_id}
+    if args.command == "descend":
+        return {"position_id": args.position_id}
+    if args.command == "field":
+        return {"altitude": args.altitude}
+    if args.command == "harvest":
+        return {"altitude": args.altitude, "max_items": args.max_items}
     if args.command in ("verify", "keep", "kill"):
         return {"id": args.id}
     if args.command == "judge":
@@ -523,6 +818,12 @@ def main(argv: list[str] | None = None) -> int:
             client = Client(args.url, timeout=args.timeout)
             if args.command == "state":
                 result = client.get_state()
+            elif args.command == "positions":
+                result = positions_view(
+                    client.get_state(),
+                    altitude=args.altitude,
+                    include_folded=args.include_folded,
+                )
             elif args.command == "workspace":
                 if args.workspace_command == "list":
                     result = client.list_workspaces()
@@ -544,10 +845,8 @@ def main(argv: list[str] | None = None) -> int:
                 if not isinstance(payload, dict):
                     raise CliError("--data must be a JSON object")
                 result = client.post(args.action, payload)
-            elif args.command == "adopt-memory":
-                result = client.post("recall/adopt", _payload(args))
-            elif args.command == "dismiss-memory":
-                result = client.post("recall/dismiss", _payload(args))
+            elif args.command in _COMMAND_ACTIONS:
+                result = client.post(_COMMAND_ACTIONS[args.command], _payload(args))
             else:
                 result = client.post(args.command, _payload(args))
         _write_json(sys.stdout, result)

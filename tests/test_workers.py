@@ -230,3 +230,183 @@ def test_atomize_caps_output_at_two_artifacts():
     result = workers.atomize("Three things happened", ["Ops"])
 
     assert len(result) == 2
+
+
+# -- recognize (§2.2) ------------------------------------------------------
+
+
+def _recognition(**updates):
+    payload = {
+        "click": True,
+        "abstraction": "Backpressure absent at every ingress boundary",
+        "specializer_a": "the upload queue during bursts",
+        "specializer_b": "the webhook fan-out at peak",
+        "scope_boundary": "does not cover latency from cold starts",
+    }
+    payload.update(updates)
+    return payload
+
+
+def test_recognize_defaults_to_no_click_and_says_so_in_the_prompt():
+    """§2.2 — the contract is `{"click": false}`; 'no' is the expected answer."""
+    provider = AnsweringProvider({
+        "click": False,
+        "abstraction": "",
+        "specializer_a": "",
+        "specializer_b": "",
+        "scope_boundary": "",
+    })
+    providers.reset_chain(Chain([provider]))
+
+    result = workers.recognize(
+        {"text": "Uploads stall under burst"},
+        {"text": "Webhooks drop at peak"},
+        "why does throughput collapse?",
+    )
+
+    assert result["click"] is False
+    assert result["failed"] is False
+    assert result["abstraction"] == ""
+    assert "click=false" in provider.prompt
+    assert "Most pairs of claims are simply unrelated" in provider.prompt
+
+
+def test_recognize_returns_the_full_gate_payload_on_a_positive_click():
+    provider = AnsweringProvider(_recognition())
+    providers.reset_chain(Chain([provider]))
+
+    result = workers.recognize(
+        {"text": "Uploads stall under burst"}, {"text": "Webhooks drop at peak"}
+    )
+
+    assert result["click"] is True
+    assert result["abstraction"].startswith("Backpressure absent")
+    assert result["specializer_a"] == "the upload queue during bursts"
+    assert result["specializer_b"] == "the webhook fan-out at peak"
+    assert result["scope_boundary"] == "does not cover latency from cold starts"
+    assert result["failed"] is False
+
+
+def test_recognize_offers_no_tension_or_synthesis_option():
+    """§6 — the schema offered TENSION, so the model produced it. Removed."""
+    provider = AnsweringProvider(_recognition())
+    providers.reset_chain(Chain([provider]))
+
+    workers.recognize({"text": "A"}, {"text": "B"})
+
+    assert set(provider.schema["properties"]) == {
+        "click",
+        "abstraction",
+        "specializer_a",
+        "specializer_b",
+        "scope_boundary",
+    }
+    assert "TENSION" not in provider.prompt
+    assert "SYNTHESIS" not in provider.prompt
+    assert "DISCRIMINATOR" not in provider.prompt
+
+
+def test_positive_click_with_empty_abstraction_is_coerced_to_no_click():
+    """§2.2 — an unstated frame is not a frame."""
+    provider = AnsweringProvider(_recognition(abstraction="   "))
+    providers.reset_chain(Chain([provider]))
+
+    result = workers.recognize({"text": "A"}, {"text": "B"})
+
+    assert result["click"] is False
+    assert result["failed"] is False
+    assert result["specializer_a"] == ""
+
+
+def test_provider_outage_recognizes_as_failed_not_as_no_click():
+    """§2.2 fail-closed — an outage must not consume the pair (§2.3)."""
+    providers.reset_chain(Chain([UnavailableProvider()]))
+
+    result = workers.recognize({"text": "A"}, {"text": "B"})
+
+    assert result["click"] is False
+    assert result["failed"] is True
+
+
+# -- derive (§1.4) ---------------------------------------------------------
+
+
+def test_derive_returns_claims_with_their_falsification_hints():
+    provider = AnsweringProvider({
+        "claims": [
+            {"text": "The queue has no bounded buffer",
+             "falsification": "a config showing maxsize > 0"},
+            {"text": "Producers never observe consumer lag",
+             "falsification": "a lag metric wired into the producer"},
+        ]
+    })
+    providers.reset_chain(Chain([provider]))
+
+    result = workers.derive(
+        {"text": "Backpressure absent at every ingress boundary"}, "why?"
+    )
+
+    assert result["ok"] is True
+    assert [claim["text"] for claim in result["claims"]] == [
+        "The queue has no bounded buffer",
+        "Producers never observe consumer lag",
+    ]
+    assert all(claim["falsification"] for claim in result["claims"])
+    assert "do not invent evidence" in provider.prompt
+
+
+def test_derive_drops_a_claim_with_no_falsification_hint():
+    """§1.4 — a claim nobody can imagine flipping is not receipt-checkable."""
+    provider = AnsweringProvider({
+        "claims": [
+            {"text": "Something is wrong somewhere", "falsification": ""},
+            {"text": "The buffer is unbounded", "falsification": "the config"},
+        ]
+    })
+    providers.reset_chain(Chain([provider]))
+
+    result = workers.derive({"text": "A frame"})
+
+    assert [claim["text"] for claim in result["claims"]] == [
+        "The buffer is unbounded"
+    ]
+
+
+def test_derive_caps_proposals_at_the_derive_cap():
+    provider = AnsweringProvider({
+        "claims": [
+            {"text": f"Claim {index}", "falsification": f"receipt {index}"}
+            for index in range(9)
+        ]
+    })
+    providers.reset_chain(Chain([provider]))
+
+    result = workers.derive({"text": "A frame"})
+
+    assert len(result["claims"]) == workers.DERIVE_CAP == 5
+
+
+def test_derive_fails_closed_when_nothing_is_checkable():
+    provider = AnsweringProvider({
+        "claims": [{"text": "Vibes are bad", "falsification": ""}]
+    })
+    providers.reset_chain(Chain([provider]))
+
+    result = workers.derive({"text": "A frame"})
+
+    assert result["ok"] is False
+    assert result["claims"] == []
+
+
+def test_derive_is_unavailable_rather_than_inventing_claims():
+    providers.reset_chain(Chain([UnavailableProvider()]))
+
+    result = workers.derive({"text": "A frame"})
+
+    assert result["ok"] is False
+    assert result["claims"] == []
+
+
+def test_fuse_is_gone():
+    """§2.1 — deleted outright, not feature-flagged."""
+    assert not hasattr(workers, "fuse")

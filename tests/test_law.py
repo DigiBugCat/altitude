@@ -1,7 +1,8 @@
-"""The law, end to end: inference proposes; receipts settle.
+"""The law, end to end: recognition organizes; receipts settle.
 
 These regression tests prevent model output — successful or otherwise — from
-being laundered into a permanent verdict that archives its parent cards.
+being laundered into a permanent verdict, and prevent a click from consuming
+the ground it stands on.
 
 No network. The provider chain is replaced with fakes throughout.
 """
@@ -13,8 +14,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from magpie import providers, workers  # noqa: E402
-from magpie.engine import Engine  # noqa: E402
+from magpie import providers  # noqa: E402
+from magpie.engine import ClickProposal, Engine, GateFailure  # noqa: E402
 from magpie.providers import Chain, ProviderUnavailable  # noqa: E402
 
 
@@ -45,60 +46,10 @@ class EmptyProvider:
         return self.payload
 
 
-class GoodProvider:
-    name = "good"
-
-    def available(self):
-        return True
-
-    def complete(self, prompt, schema=None, timeout=30):
-        return {"kind": "SYNTHESIS", "text": "a real fused claim"}
-
-
 @pytest.fixture
 def restore_chain():
     yield
     providers.reset_chain(None)
-
-
-# ---------------- workers.fuse fails closed ----------------
-
-
-def test_fuse_reports_not_ok_when_no_provider_answers(restore_chain):
-    providers.reset_chain(Chain([DeadProvider()]))
-    out = workers.fuse({"text": "a"}, {"text": "b"}, "q")
-    assert out["ok"] is False
-    assert "unavailable" in out["provenance"]
-
-
-@pytest.mark.parametrize("payload", [
-    {"kind": "SYNTHESIS", "text": ""},
-    {"kind": "SYNTHESIS", "text": "   "},
-    {"kind": "SYNTHESIS"},
-    {},
-])
-def test_fuse_reports_not_ok_on_empty_text(payload, restore_chain):
-    providers.reset_chain(Chain([EmptyProvider(payload)]))
-    out = workers.fuse({"text": "a"}, {"text": "b"}, "q")
-    assert out["ok"] is False
-
-
-def test_fuse_reports_ok_with_a_real_answer(restore_chain):
-    providers.reset_chain(Chain([GoodProvider()]))
-    out = workers.fuse({"text": "a"}, {"text": "b"}, "q")
-    assert out["ok"] is True
-    assert out["text"] == "a real fused claim"
-    assert out["provenance"] == "proposed by good"
-
-
-def test_fuse_falls_through_a_dead_backend_to_a_live_one(restore_chain):
-    providers.reset_chain(Chain([DeadProvider(), GoodProvider()]))
-    out = workers.fuse({"text": "a"}, {"text": "b"}, "q")
-    assert out["ok"] is True
-    assert out["provenance"] == "proposed by good"
-
-
-# ---------------- the server fuse path honours it ----------------
 
 
 @pytest.fixture
@@ -114,86 +65,128 @@ def srv(monkeypatch, tmp_path):
     return server
 
 
-def _collided(server):
-    a = server.ENGINE.propose("a", section="field")
-    b = server.ENGINE.propose("b", section="field")
-    child = server.ENGINE.collide(a.id, b.id)
-    return a, b, child
+def _proposal(**over):
+    base = dict(
+        abstraction="Every retry pathway silently duplicates downstream effects",
+        specializer_a="when the duplicate arrives over the payment channel",
+        specializer_b="when the duplicate arrives through the email sender",
+        scope_boundary="does not cover read-only queries, which are idempotent",
+    )
+    base.update(over)
+    return ClickProposal(**base)
 
 
-def test_provider_outage_never_settles_the_child(srv, monkeypatch):
-    """THE regression: fusion unavailable must NOT produce a supported card."""
-    a, b, child = _collided(srv)
-    monkeypatch.setattr(workers, "fuse", lambda *_: {
-        "ok": False, "text": "unresolved collision: a / b",
-        "kind": "TENSION",
-        "provenance": "fusion unavailable · no provider answered",
-    })
-    srv._run_fuse(child.id, {"text": "a"}, {"text": "b"}, "q")
-
-    c = srv.ENGINE.cards[child.id]
-    assert c.state == "open", "a failed inference job must leave no stuck job state"
-    assert c.receipt is None
-    assert c.kind == "claim"
-    # and the parents must survive — they were never superseded by anything
-    assert not srv.ENGINE.cards[a.id].archived
-    assert not srv.ENGINE.cards[b.id].archived
+def _pair(engine):
+    """Two instances plus the §7.1 budget a click costs."""
+    for i in range(5):
+        engine.propose(f"funding contribution {i}", section="field")
+    a = engine.propose("payment retries duplicate charges", section="field")
+    b = engine.propose("email retries duplicate sends", section="field")
+    return a, b
 
 
-def test_worker_exception_never_settles_the_child(srv, monkeypatch):
-    a, b, child = _collided(srv)
-
-    def boom(*_):
-        raise RuntimeError("worker exploded")
-
-    monkeypatch.setattr(workers, "fuse", boom)
-    srv._run_fuse(child.id, {"text": "a"}, {"text": "b"}, "q")
-
-    assert srv.ENGINE.cards[child.id].state == "open"
-    assert not srv.ENGINE.cards[a.id].archived
+# ---------------- inference can never settle anything ----------------
 
 
-def test_blank_provenance_still_cannot_settle_the_child(srv, monkeypatch):
-    a, b, child = _collided(srv)
-    monkeypatch.setattr(workers, "fuse", lambda *_: {
-        "ok": True, "text": "something", "kind": "SYNTHESIS", "provenance": "   ",
-    })
-    srv._run_fuse(child.id, {"text": "a"}, {"text": "b"}, "q")
-    assert srv.ENGINE.cards[child.id].state == "open"
-    assert srv.ENGINE.cards[child.id].receipt is None
+def test_a_confirmed_click_settles_nothing(restore_chain):
+    """THE regression, restated for Altitude.
+
+    The old law let a supported synthesis archive its parents. Under §1.6 a
+    click creates an OPEN frame with no receipt and folds its instances: the
+    ground survives, and nothing anywhere became true.
+    """
+    e = Engine(cap=12)
+    a, b = _pair(e)
+    cand = e.propose_click(a.id, b.id, _proposal())
+    frame = e.confirm_click(cand.id, confirmed_by="andrew")
+
+    assert frame.occupant.state == "open"
+    assert frame.receipt is None
+    assert not e.cards[a.id].archived
+    assert not e.cards[b.id].archived
+    settled = [c for c in e.cards.values() if c.state in ("supported", "refuted")]
+    assert settled == []
+    assert not any(l["kind"] == "RESOLVED" for l in e.ledger)
 
 
-def test_successful_fusion_creates_open_proposal_without_receipt(srv, monkeypatch):
-    a, b, child = _collided(srv)
-    monkeypatch.setattr(workers, "fuse", lambda *_: {
-        "ok": True, "text": "the fused claim", "kind": "SYNTHESIS",
-        "provenance": "proposed by good",
-    })
-    srv._run_fuse(child.id, {"text": "a"}, {"text": "b"}, "q")
+def test_no_gate_passing_proposal_can_reach_the_field_without_a_human(restore_chain):
+    """§2.4 — the inbox is the only door, and it needs a human verdict."""
+    e = Engine(cap=12)
+    a, b = _pair(e)
+    before = {c.id for c in e.live()}
 
-    c = srv.ENGINE.cards[child.id]
-    assert c.state == "open"
-    assert c.text == "the fused claim"
-    assert c.receipt is None
-    assert c.kind == "synthesis"
-    assert "proposed by good" in c.foot
-    assert not any(l["kind"] == "RESOLVED" for l in srv.ENGINE.ledger)
-    assert not srv.ENGINE.cards[a.id].archived
-    assert not srv.ENGINE.cards[b.id].archived
+    e.propose_click(a.id, b.id, _proposal())
+
+    assert {c.id for c in e.live()} == before
+    assert not any(p.floor_kind == "frame" for p in e.all_positions())
 
 
-def test_a_full_outage_leaves_no_settled_cards_at_all(srv, monkeypatch, restore_chain):
-    """Drive the real worker over a dead chain: nothing may settle."""
+def test_a_failed_gate_emits_nothing_at_all(restore_chain):
+    """§1.3 — a failed gate is not a card."""
+    e = Engine(cap=12)
+    a, b = _pair(e)
+    before = set(e.cards)
+
+    with pytest.raises(GateFailure):
+        e.propose_click(a.id, b.id, _proposal(
+            abstraction="both concern retries and duplicate",
+        ))
+
+    assert set(e.cards) == before
+    assert e.click_candidates == {}
+
+
+def test_a_provider_outage_leaves_no_settled_positions_at_all(restore_chain):
+    """Drive the scanner over a dead chain: nothing may settle, ever.
+
+    The scanner returns a pair to *ask about*, never a card, so an outage
+    produces exactly nothing — and records `failed`, which under §2.3 does not
+    consume the pair.
+    """
     providers.reset_chain(Chain([DeadProvider()]))
+    e = Engine(cap=12)
+    a, b = _pair(e)
+
     for _ in range(3):
-        pair = srv.ENGINE.best_pair()
+        pair = e.scan_candidates(lambda x, y: 0.9)
         if not pair:
             break
-        child = srv.ENGINE.collide(*pair)
-        srv._run_fuse(child.id, {"text": "a"}, {"text": "b"}, "q")
-    settled = [c for c in srv.ENGINE.cards.values()
-               if c.state in ("supported", "refuted")]
+        # The provider is down, so the worker returns nothing to gate.
+        e.record_attempt(pair[0], pair[1], "failed")
+
+    settled = [c for c in e.cards.values() if c.state in ("supported", "refuted")]
     assert settled == []
+    assert not any(p.floor_kind == "frame" for p in e.all_positions())
+    assert e.pair_consumed(a.id, b.id) is False
+
+
+def test_an_empty_abstraction_is_coerced_to_no_click(restore_chain):
+    """§2.2 fail-closed — a positive click with empty text emits nothing."""
+    e = Engine(cap=12)
+    a, b = _pair(e)
+
+    with pytest.raises(GateFailure, match="generativity"):
+        e.propose_click(a.id, b.id, _proposal(abstraction="   "))
+
+    assert e.click_candidates == {}
+    assert e.pair_consumed(a.id, b.id)
+
+
+def test_a_receipt_on_the_floor_is_the_only_thing_that_moves_a_frame(restore_chain):
+    """§1.5 — frames re-score from below and store nothing of their own."""
+    e = Engine(cap=12)
+    a, b = _pair(e)
+    cand = e.propose_click(a.id, b.id, _proposal())
+    frame = e.confirm_click(cand.id, confirmed_by="andrew")
+
+    assert e.frame_support(frame.id)["supported"] == 0
+
+    with pytest.raises(ValueError, match="only claims"):
+        e.resolve(frame.id, "supported", "a receipt aimed at the wrong floor")
+
+    e.resolve(a.id, "supported", "ledger line 4412 shows the double charge")
+    assert e.frame_support(frame.id)["supported"] == 1
+    assert frame.receipt is None
 
 
 # ---------------- future verifier hook is explicit and inert by default ----

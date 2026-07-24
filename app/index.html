@@ -1009,7 +1009,9 @@ function render(){
     ['EXPERIMENTS','experiment',digestList(rawDigest&&(rawDigest.experiments??digestArtifacts.experiments))],
     ['TASKS','task',digestList(rawDigest&&(rawDigest.tasks??digestArtifacts.tasks))]
   ].filter(([, ,items])=>items.length);
-  const between=digestList(rawDigest&&rawDigest.between_ideas).slice(0,3);
+  // SPEC §3.2: `between_ideas` became `frames` — confirmed levels of the
+  // ladder, not sparse machine connections. Truncation to 3 survives.
+  const frames=digestList(rawDigest&&rawDigest.frames).slice(0,3);
   const cardMap=new Map(cs.map(c=>[String(c.id),c]));
   const digestItem=(item,meta='',extraClass='')=>{
     const text=digestText(item);
@@ -1059,9 +1061,9 @@ function render(){
       <div class="artifactrows">${artifactGroups.map(([label,type,items])=>
         items.map(item=>digestItem(item,label,`artifact-${type}`)).join('')).join('')}</div></section>`);
   }
-  if(between.length){
-    mapGroups.push(`<section class="digestgroup between"><div class="dh">BETWEEN IDEAS</div>${
-      between.map(item=>digestItem(item,digestMeta(item))).join('')
+  if(frames.length){
+    mapGroups.push(`<section class="digestgroup between"><div class="dh">FRAMES</div>${
+      frames.map(item=>digestItem(item,digestMeta(item))).join('')
     }</section>`);
   }
   $('#synthtitle').textContent='Conversation map';

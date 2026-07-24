@@ -21,16 +21,41 @@ from . import server
 
 
 GUIDE = """\
-Magpie is a persistent field for developing thoughts, not an authority that
-settles truth automatically. Choose a workspace explicitly for every field
-operation. Use contribute for raw speech or notes; it queues asynchronous
-atomization, so poll get_field to observe resulting cards. Use
-get_conversation_map for the compact digest of themes, recurring ideas, typed
-follow-ups, and sparse connections. collide and organize change the field.
-recall_workspace searches the private Raven memory graph through Magpie;
-adopt_memory imports one suggestion as an open local card.
-Only the human-facing browser may judge, dismiss, or create a verification
-receipt; those operations are intentionally absent from MCP.
+Altitude is a persistent LADDER of positions, not a pile of cards, and not an
+authority that settles truth automatically. Choose a workspace explicitly for
+every field operation.
+
+The model has three floors. Receipts are evidence events. Claims (altitude 0)
+are atomic, receipt-checkable propositions. Frames (altitude 1+) are
+abstractions standing on claims; a frame is NEVER directly supported or
+refuted — its support is computed from the floor below on every read, so no
+level can ever drift from the level under it.
+
+Reading: get_field(workspace_id, altitude) returns one floor, defaulting to the
+top; every position carries its supports, its computed support summary, and
+when it was last grounded. descend(position_id) swaps to a frame's floor,
+folded instances included. get_conversation_map gives the compact digest.
+harvest(altitude) writes the decision-ready brief.
+
+Going up: propose_click(a, b) asks whether two positions are two instances of
+ONE frame. Most pairs are not, and "no" is the expected answer. A click that
+passes the gates lands in the emergence inbox (pending_clicks) — never in the
+field. Only a human confirms it, and confirming means "organize these
+together", not "this is true": the new frame is created OPEN with no receipt
+and both instances stay alive one floor down, folded rather than archived.
+unfold(frame_id) reverses that at any time.
+
+Going down: derive(frame_id) proposes the atomic claims that would make a frame
+true. They arrive as visibly ungrounded slots — structure awaiting evidence.
+Derivation asserts nothing.
+
+reconsider_pair(a, b) is the deliberate retry door for a settled non-click.
+recall_workspace searches private Raven memory; adopt_memory imports one
+suggestion as a quarantined sub-ladder awaiting a human.
+
+Only the human-facing browser may judge, dismiss, confirm a click, or create a
+verification receipt. Those operations are intentionally absent from MCP: this
+surface can propose structure, never settle it.
 """
 
 READ_ONLY = ToolAnnotations(
@@ -122,7 +147,10 @@ _DIGEST_LIST_KEYS = (
     "constraints",
     "experiments",
     "tasks",
-    "between_ideas",
+    # §3.2: `between_ideas` becomes `frames`. The truncation to 3 survives — it
+    # was already the right instinct; only the thing being counted changed,
+    # from sparse machine connections to confirmed levels of the ladder.
+    "frames",
 )
 
 
@@ -135,9 +163,8 @@ def _conversation_map(workspace_id: str) -> dict[str, Any]:
     for key in _DIGEST_LIST_KEYS:
         if not isinstance(digest.get(key), list):
             digest[key] = []
-    # Connections are deliberately a sparse secondary surface. Enforce that
-    # contract at the agent boundary even while the internal digest evolves.
-    digest["between_ideas"] = digest["between_ideas"][:3]
+    digest.pop("between_ideas", None)
+    digest["frames"] = digest["frames"][:3]
     return {"workspace_id": workspace_id, "digest": digest}
 
 
@@ -207,17 +234,93 @@ def _contribute(workspace_id: str, text: str) -> dict[str, Any]:
     }
 
 
-def _collide(workspace_id: str, a: str, b: str) -> dict[str, Any]:
+def _get_field(workspace_id: str, altitude: int | None = None) -> dict[str, Any]:
+    """§3.2 — the field at one altitude, every position carrying its structure."""
+    _workspace(workspace_id)
+    field = server._api_field(
+        {"workspace_id": workspace_id, "altitude": altitude}
+    )
+    state = _state_for(workspace_id)
+    # The digest and workspace envelope stay attached: agents used `get_field`
+    # as their whole read surface before altitude existed, and removing that
+    # would make the tool strictly less useful than the thing it replaces.
+    return {
+        **field,
+        "question": state.get("question"),
+        "sections": state.get("sections"),
+        "digest": state.get("digest"),
+        "workspace": state.get("workspace"),
+        "memory_shelf": state.get("memory_shelf"),
+    }
+
+
+def _descend(workspace_id: str, position_id: str) -> dict[str, Any]:
+    _workspace(workspace_id)
+    position_id = str(position_id or "").strip()
+    if not position_id:
+        raise ValueError("position_id is required")
+    return server._api_descend(
+        {"workspace_id": workspace_id, "position_id": position_id}
+    )
+
+
+def _propose_click(workspace_id: str, a: str, b: str) -> dict[str, Any]:
+    """§2.1/§2.4 — request a recognition. It can only reach the inbox.
+
+    This replaces the ``collide`` tool. An agent can ask whether two positions
+    are one idea; it cannot put anything in the field by asking, and it cannot
+    confirm the answer — that verdict is human-only and lives at
+    ``resolve_click``, which is deliberately absent from this surface.
+    """
+    _workspace(workspace_id)
     a = str(a or "").strip()
     b = str(b or "").strip()
     if not a or not b:
         raise ValueError("a and b are required")
     if a == b:
-        raise ValueError("a and b must identify different cards")
-    with server.LOCK:
-        _target_engine(workspace_id)
-        card = server._collide_and_fuse(a, b, workspace_id)
-    return {"queued": True, "workspace_id": workspace_id, "card": card}
+        raise ValueError("a and b must identify different positions")
+    return server._api_propose_click({"workspace_id": workspace_id, "a": a, "b": b})
+
+
+def _pending_clicks(
+    workspace_id: str, include_rejected: bool = False
+) -> dict[str, Any]:
+    _workspace(workspace_id)
+    return server._api_pending_clicks(
+        {"workspace_id": workspace_id, "include_rejected": bool(include_rejected)}
+    )
+
+
+def _reconsider_pair(workspace_id: str, a: str, b: str) -> dict[str, Any]:
+    _workspace(workspace_id)
+    return server._api_reconsider_pair(
+        {"workspace_id": workspace_id, "a": str(a or ""), "b": str(b or "")}
+    )
+
+
+def _unfold(workspace_id: str, frame_id: str) -> dict[str, Any]:
+    _workspace(workspace_id)
+    frame_id = str(frame_id or "").strip()
+    if not frame_id:
+        raise ValueError("frame_id is required")
+    return server._api_unfold(
+        {"workspace_id": workspace_id, "frame_id": frame_id}
+    )
+
+
+def _derive(workspace_id: str, frame_id: str) -> dict[str, Any]:
+    """§1.4 — fill structure beneath a frame. Asserts nothing.
+
+    Every claim this creates arrives as an ungrounded slot: `open`, never
+    grounded, scanner-ineligible and bank-ineligible until a receipt lands or a
+    human pins it. An agent can state what evidence *would* settle a frame; it
+    still cannot supply that evidence through MCP.
+    """
+    _workspace(workspace_id)
+    frame_id = str(frame_id or "").strip()
+    if not frame_id:
+        raise ValueError("frame_id is required")
+    return server._run_derive(frame_id, workspace_id)
 
 
 def _section_key(engine: Any, value: str) -> str:
@@ -302,16 +405,21 @@ def _organize(
     }
 
 
-def _harvest(workspace_id: str) -> dict[str, Any]:
+def _harvest(
+    workspace_id: str, altitude: int | None = None, max_items: int = 12
+) -> dict[str, Any]:
+    """§3.3 — the decision-ready brief at an altitude, hard-capped per section."""
     with server.LOCK:
         engine, _is_current = _target_engine(workspace_id)
-        brief = engine.harvest()
+        floor = None if altitude is None else max(0, int(altitude))
+        brief = engine.harvest(altitude=floor, max_items=max(1, int(max_items)))
         workspace = _save(
             workspace_id,
             engine,
             event_kind="workspace.harvested",
             event_payload={
-                "cards": len(brief.get("cards") or []),
+                "altitude": brief.get("altitude"),
+                "spine": len(brief.get("spine") or []),
                 "source": "mcp",
             },
             increment_context=False,
@@ -351,7 +459,9 @@ def register_tools(mcp: Any) -> None:
         """Explain Magpie's model, safe tool use, and provenance boundary."""
         return {
             "guide": GUIDE,
-            "human_only_operations": ["judge", "kill", "verify", "resolve"],
+            "human_only_operations": [
+                "judge", "kill", "verify", "resolve", "resolve_click",
+            ],
         }
 
     @mcp.tool(annotations=READ_ONLY)
@@ -372,9 +482,23 @@ def register_tools(mcp: Any) -> None:
         return _create_workspace(name, question)
 
     @mcp.tool(annotations=READ_ONLY)
-    def get_field(workspace_id: str) -> dict[str, Any]:
-        """Read one workspace's field without changing any active workspace."""
-        return _state_for(workspace_id)
+    def get_field(
+        workspace_id: str, altitude: int | None = None
+    ) -> dict[str, Any]:
+        """Read one floor of the ladder; omit altitude for the top."""
+        return _get_field(workspace_id, altitude)
+
+    @mcp.tool(annotations=READ_ONLY)
+    def descend(workspace_id: str, position_id: str) -> dict[str, Any]:
+        """Read the floor beneath one frame, folded instances included."""
+        return _descend(workspace_id, position_id)
+
+    @mcp.tool(annotations=READ_ONLY)
+    def pending_clicks(
+        workspace_id: str, include_rejected: bool = False
+    ) -> dict[str, Any]:
+        """List open emergence-inbox candidates; optionally near-misses too."""
+        return _pending_clicks(workspace_id, include_rejected)
 
     @mcp.tool(annotations=READ_ONLY)
     def get_conversation_map(workspace_id: str) -> dict[str, Any]:
@@ -408,9 +532,24 @@ def register_tools(mcp: Any) -> None:
         return _contribute(workspace_id, text)
 
     @mcp.tool(annotations=LOCAL_WRITE)
-    def collide(workspace_id: str, a: str, b: str) -> dict[str, Any]:
-        """Queue a synthesis attempt between two cards in one workspace."""
-        return _collide(workspace_id, a, b)
+    def propose_click(workspace_id: str, a: str, b: str) -> dict[str, Any]:
+        """Ask whether two positions are instances of one frame; inbox only."""
+        return _propose_click(workspace_id, a, b)
+
+    @mcp.tool(annotations=LOCAL_WRITE)
+    def reconsider_pair(workspace_id: str, a: str, b: str) -> dict[str, Any]:
+        """Deliberately reopen a settled non-click pair, visibly versioned."""
+        return _reconsider_pair(workspace_id, a, b)
+
+    @mcp.tool(annotations=LOCAL_WRITE)
+    def derive(workspace_id: str, frame_id: str) -> dict[str, Any]:
+        """Propose the atomic claims that would ground a frame, as empty slots."""
+        return _derive(workspace_id, frame_id)
+
+    @mcp.tool(annotations=LOCAL_WRITE)
+    def unfold(workspace_id: str, frame_id: str) -> dict[str, Any]:
+        """Release a frame's instances and vacate the frame position."""
+        return _unfold(workspace_id, frame_id)
 
     @mcp.tool(annotations=LOCAL_WRITE)
     def organize(
@@ -434,6 +573,10 @@ def register_tools(mcp: Any) -> None:
         )
 
     @mcp.tool(annotations=LOCAL_WRITE)
-    def harvest(workspace_id: str) -> dict[str, Any]:
-        """Write and return the current structured brief for one workspace."""
-        return _harvest(workspace_id)
+    def harvest(
+        workspace_id: str,
+        altitude: int | None = None,
+        max_items: int = 12,
+    ) -> dict[str, Any]:
+        """Write and return the decision-ready brief at one altitude."""
+        return _harvest(workspace_id, altitude, max_items)

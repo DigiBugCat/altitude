@@ -1,36 +1,154 @@
 {
-  "name": "offline smoke",
+  "name": "offline smoke — the ladder law over the public HTTP boundary",
+  "note": [
+    "Runs against the deterministic stub provider, so every assertion below is",
+    "about the ENGINE's law, never about a model's judgment. The stub answers",
+    "click=false for every pair (SPEC §2.2: 'no' is the expected answer), which",
+    "is why this scenario proves the negative path end-to-end: a recognition",
+    "request that clicks nothing still writes a never-retry row, that row is",
+    "terminal, and reconsider_pair is the only door back. A confirmed fold",
+    "cannot be reached offline because no stub passes the §1.3 gates — see",
+    "tests/test_ladder_api.py for the accept path under an injected provider."
+  ],
   "steps": [
     {
+      "note": "The field starts empty: no positions, no ladder, no inbox.",
+      "assert": { "path": "positions.count", "equals": 0 }
+    },
+    { "assert": { "path": "floors.count", "equals": 0 } },
+    { "assert": { "path": "inbox.count", "equals": 0 } },
+
+    {
       "action": "seed",
-      "question": "What makes a local Magpie iteration loop trustworthy?"
+      "question": "What makes a local Altitude iteration loop trustworthy?"
     },
     {
       "assert": {
         "path": "question",
-        "equals": "What makes a local Magpie iteration loop trustworthy?"
+        "equals": "What makes a local Altitude iteration loop trustworthy?"
       }
     },
+
     {
+      "note": "Human contributions atomize into floor-0 positions (§1.1).",
       "action": "propose",
       "text": "The loop must exercise the public HTTP boundary."
     },
+    { "wait": { "path": "positions.count", "equals": 1 }, "timeout": 8 },
     {
-      "wait": {
-        "path": "cards.count",
-        "equals": 1
-      },
-      "timeout": 5
+      "action": "propose",
+      "text": "Latency budgets must be measured on real hardware."
+    },
+    { "wait": { "path": "positions.count", "equals": 2 }, "timeout": 8 },
+
+    {
+      "note": "Atomization only ever lands on floor 0: claims, one floor.",
+      "assert": { "path": "positions.claims", "equals": 2 }
+    },
+    { "assert": { "path": "positions.frames", "equals": 0 } },
+    { "assert": { "path": "floors.count", "equals": 1 } },
+    { "assert": { "path": "floors.max_altitude", "equals": 0 } },
+    {
+      "note": "§1.4 — a fresh position is ungrounded: no receipt has touched it.",
+      "assert": { "path": "positions.grounded", "equals": 0 }
+    },
+    { "assert": { "path": "contributions.count", "equals": 2 } },
+
+    {
+      "note": "§2.1 — the human-initiated recognition request. Its only possible destinations are the emergence inbox and the never-retry ledger; it can never write to the field.",
+      "action": "click/propose",
+      "a": "@position:0",
+      "b": "@position:1"
     },
     {
+      "note": "The stub declines to recognize, so nothing was emitted — the designed outcome, not a failure.",
+      "assert": { "path": "inbox.count", "equals": 0 }
+    },
+    {
+      "note": "§1.3 — a failed recognition is not a card. The field is untouched.",
+      "assert": { "path": "positions.count", "equals": 2 }
+    },
+    { "assert": { "path": "positions.frames", "equals": 0 } },
+    { "assert": { "path": "floors.count", "equals": 1 } },
+    {
+      "note": "§1.6 — and nothing was consumed either: both instances are still live and unfolded. This is the line the deleted fuse() crossed.",
+      "assert": { "path": "positions.folded", "equals": 0 }
+    },
+    {
+      "note": "§2.3 — but the attempt IS remembered, separately from its output.",
+      "assert": { "path": "attempts.count", "equals": 1 }
+    },
+    { "assert": { "path": "attempts.consumed", "equals": 1 } },
+    {
+      "note": "§1.6/§7.1 — recognition settled nothing, so no click was confirmed.",
+      "assert": { "path": "clicks.confirmed", "equals": 0 }
+    },
+
+    {
+      "note": "§2.3 — the ledger row is terminal. Retry is a paper-trailed human act, so reconsider_pair opens operation_version 2 and the same request may be answered again.",
+      "action": "click/reconsider",
+      "a": "@position:0",
+      "b": "@position:1"
+    },
+    {
+      "action": "click/propose",
+      "a": "@position:0",
+      "b": "@position:1"
+    },
+    {
+      "note": "Two rows now, one per (pair, operation_version): no_click at v1 and no_click at v2, the reconsideration row having been answered in place. The v1 row survives — the paper trail is never overwritten by a later version.",
+      "assert": { "path": "attempts.count", "equals": 2 }
+    },
+    {
+      "note": "Both are consumed: `attempts.consumed` counts only outcomes that close a pair, and would not have counted a provider outage (§2.2 fail-closed, non-consuming).",
+      "assert": { "path": "attempts.consumed", "equals": 2 }
+    },
+    { "assert": { "path": "inbox.count", "equals": 0 } },
+    {
+      "note": "Reconsideration is a door back to the QUESTION, never to the field.",
+      "assert": { "path": "positions.count", "equals": 2 }
+    },
+
+    {
+      "note": "§7.2 — near-misses are private metrics with an operator drill-down, never field spam.",
+      "action": "click/pending",
+      "include_rejected": true
+    },
+
+    {
+      "note": "§3.1/§3.2 — the navigator. Altitude 0 is the whole field here.",
+      "action": "field",
+      "altitude": 0
+    },
+    {
+      "note": "§1.6 — descending a claim shows its floor, which is empty.",
+      "action": "descend",
+      "position_id": "@position:0"
+    },
+
+    {
+      "note": "§1.2 — pinning moves an occupant's presentation and never touches the structure.",
       "action": "keep",
-      "id": "@card:0"
+      "id": "@position:0"
     },
+    { "assert": { "path": "positions.count", "equals": 2 } },
+    { "assert": { "path": "floors.count", "equals": 1 } },
+
     {
-      "assert": {
-        "path": "cards.count",
-        "equals": 1
-      }
-    }
+      "note": "§3.3 — the decision-ready brief, capped, not a dump.",
+      "action": "harvest",
+      "altitude": 0,
+      "max_items": 12
+    },
+
+    {
+      "note": "Final invariant: two live claims, one floor, an empty inbox, nothing folded, and nothing settled without a receipt.",
+      "assert": { "path": "positions.count", "equals": 2 }
+    },
+    { "assert": { "path": "positions.folded", "equals": 0 } },
+    { "assert": { "path": "positions.external", "equals": 0 } },
+    { "assert": { "path": "cards.settled", "equals": 0 } },
+    { "assert": { "path": "clicks.confirmed", "equals": 0 } },
+    { "assert": { "path": "inbox.count", "equals": 0 } }
   ]
 }

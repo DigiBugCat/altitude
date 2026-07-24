@@ -251,7 +251,15 @@ class StubProvider:
 
     name = "stub"
     FOOT = "stub · offline"
-    _PAYLOAD_LABELS = ("THOUGHT:", "CLAIM A:", "CLAIM B:", "OPEN QUESTION:")
+    _PAYLOAD_LABELS = (
+        "THOUGHT:", "CLAIM A:", "CLAIM B:", "FRAME:", "OPEN QUESTION:",
+    )
+    # `atomize()` does not use a `LABEL:` line — it sends a JSON object on the
+    # line after `INPUT:`. Without this the stub echoed the prompt preamble,
+    # which is identical for every thought, so every offline contribution
+    # collapsed onto one card and the stub stopped being a *deterministic*
+    # double and became a constant one.
+    _PAYLOAD_JSON_KEYS = ("thought", "text")
 
     def available(self) -> bool:
         return True
@@ -266,7 +274,27 @@ class StubProvider:
                     if rest and rest != "(none stated)":
                         found.append(rest)
                     break
+            else:
+                extracted = self._from_json_line(line)
+                if extracted:
+                    found.append(extracted)
         return " / ".join(found) if found else " ".join((prompt or "").split())
+
+    def _from_json_line(self, line: str) -> str:
+        """Pull the payload out of a JSON prompt body, if the line is one."""
+        if not line.startswith("{"):
+            return ""
+        try:
+            document = json.loads(line)
+        except (ValueError, TypeError):
+            return ""
+        if not isinstance(document, dict):
+            return ""
+        for key in self._PAYLOAD_JSON_KEYS:
+            value = document.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
 
     def complete(
         self, prompt: str, schema: dict | None = None, timeout: int = 30

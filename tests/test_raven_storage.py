@@ -92,6 +92,7 @@ def test_raven_remember_outbox_dedupes_claims_retries_and_completes(tmp_path):
         ws = store.create_workspace("A")
         first = store.enqueue_raven_remember(
             "A durable thought",
+            export_class="human_root",
             workspace_id=ws.id,
             source="human",
             tags=["magpie"],
@@ -100,6 +101,7 @@ def test_raven_remember_outbox_dedupes_claims_retries_and_completes(tmp_path):
         )
         duplicate = store.enqueue_raven_remember(
             "This payload must not replace the original",
+            export_class="human_root",
             workspace_id=ws.id,
             dedupe_key="card:c1:v1",
         )
@@ -138,7 +140,9 @@ def test_raven_remember_outbox_dedupes_claims_retries_and_completes(tmp_path):
 
 def test_completed_raven_outbox_item_requires_memory_id(tmp_path):
     with Storage(tmp_path / "db.sqlite3") as store:
-        item = store.enqueue_raven_remember("Remember me")
+        item = store.enqueue_raven_remember(
+            "Remember me", export_class="human_root"
+        )
         with pytest.raises(ValueError, match="requires a raven memory id"):
             store.mark_raven_remember(item.id, "completed")
 
@@ -149,6 +153,7 @@ def test_completed_raven_outbox_preserves_each_local_ref_binding(tmp_path):
         for local_ref in ("c1", "c2"):
             item = store.enqueue_raven_remember(
                 "Canonical duplicate",
+                export_class="human_root",
                 workspace_id=ws.id,
                 dedupe_key=f"magpie-card:{ws.id}:{local_ref}",
             )
@@ -174,7 +179,8 @@ def test_raven_outbox_does_not_starve_fresh_items_behind_retries(tmp_path):
     now = [100.0]
     with Storage(tmp_path / "db.sqlite3", now=lambda: now[0]) as store:
         retried = store.enqueue_raven_remember(
-            "Waiting descendant", dedupe_key="retrying"
+            "Waiting descendant", export_class="human_root",
+            dedupe_key="retrying"
         )
         claimed = store.claim_raven_remembers(limit=1)
         assert claimed[0].id == retried.id
@@ -182,13 +188,49 @@ def test_raven_outbox_does_not_starve_fresh_items_behind_retries(tmp_path):
             retried.id, "pending", error="waiting", available_at=100.0
         )
         fresh = store.enqueue_raven_remember(
-            "Fresh root", dedupe_key="fresh"
+            "Fresh root", export_class="human_root", dedupe_key="fresh"
         )
 
         next_item = store.claim_raven_remembers(limit=1)[0]
 
         assert next_item.id == fresh.id
         assert next_item.attempts == 1
+
+
+def test_outbox_rows_carry_their_export_class_for_inspection(tmp_path):
+    """§4 — eligibility is an inspectable property of each queued write.
+
+    The point of the column is that you can audit what left the workspace
+    without re-deriving the decision from a function body.
+    """
+    with Storage(tmp_path / "db.sqlite3") as store:
+        ws = store.create_workspace("A")
+        store.enqueue_raven_remember(
+            "An atomized human contribution",
+            export_class="human_root",
+            workspace_id=ws.id,
+            dedupe_key="root",
+        )
+        store.enqueue_raven_remember(
+            "A human-confirmed frame",
+            export_class="human_curated_frame",
+            workspace_id=ws.id,
+            hints={"derived_from": ["mem-a", "mem-b"]},
+            dedupe_key="frame",
+        )
+        store.enqueue_raven_remember(
+            "A receipt-resolved claim",
+            export_class="settled_claim",
+            workspace_id=ws.id,
+            dedupe_key="settled",
+        )
+
+        classes = {
+            item.export_class for item in store.claim_raven_remembers(limit=10)
+        }
+        assert classes == {
+            "human_root", "human_curated_frame", "settled_claim"
+        }
 
 
 def test_v2_database_migrates_additively_to_raven_schema(tmp_path):

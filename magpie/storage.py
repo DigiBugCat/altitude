@@ -1,9 +1,22 @@
-"""SQLite persistence for Magpie workspaces and the shared idea bank.
+"""SQLite persistence for Altitude workspaces and the shared idea bank.
 
 The repository stores opaque JSON engine snapshots so the deterministic engine
 can evolve independently from the database schema.  Cross-workspace concepts
 (ideas, occurrences, retrieval events, memory exposures, and embeddings) are
 stored relationally.
+
+Schema v4 adds the position layer (SPEC-ALTITUDE §1.2, §5).  **The snapshot
+remains authoritative; the position tables are indices.**  ``sync_positions``
+projects a snapshot into ``positions`` / ``position_supports`` /
+``occupant_revisions`` so that durable ids, load-bearing edges, occupant
+revision history, and ``last_grounded_at`` are queryable without deserializing
+every workspace — but nothing reads structure back out of them to rebuild an
+engine.  That one-way rule is what keeps the tables from becoming a second
+source of truth that could drift from the floor (§1.5).
+
+Two derived quantities are conspicuously absent from the schema: altitude and
+frame support.  Both are computed from the floor on every read (§1.5) and
+storing either would create exactly the drift the law forbids.
 
 This module intentionally performs no inference and calls no embedding API.
 """
@@ -24,9 +37,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _SPACE_RE = re.compile(r"\s+")
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+# §4 — typed export classes.  Eligibility to reach shared memory is an
+# inspectable property of each queued write, not a condition buried in a
+# function.  A write with no class is never queued at all; these three are the
+# whole allowlist.
+EXPORT_CLASSES = ("human_root", "human_curated_frame", "settled_claim")
+
+# §1.2 mirrors of the engine vocabulary, kept here so the index can constrain
+# its own columns without importing the engine (storage stays inference-free).
+FLOOR_KINDS = ("claim", "frame")
+POSITION_STATUSES = ("live", "folded", "vacated", "retired")
+POSITION_ORIGINS = ("human", "click", "derivation", "recall")
 
 
 def new_id(prefix: str) -> str:
@@ -174,6 +199,86 @@ class RavenRemember:
     claimed_at: float | None
     completed_at: float | None
     error: str | None
+    export_class: str = "human_root"
+
+
+@dataclass(frozen=True)
+class PositionRow:
+    """The durable index row for one position (§1.2).
+
+    Altitude and frame support are deliberately absent: both are derived from
+    the floor on every read (§1.5), and a stored copy could drift.
+    """
+
+    workspace_id: str
+    position_id: str
+    floor_kind: str
+    origin: str
+    status: str
+    folded_under: str | None
+    external: bool
+    pinned_by_human: bool
+    last_grounded_at: float | None
+    occupant_text: str
+    occupant_fingerprint: str
+    artifact_type: str
+    support_state: str | None      # claims only; None for frames (§1.1)
+    receipt: str | None            # claims only
+    supports: list[str]            # load-bearing edges, one floor DOWN
+    provenance: list[str]          # legacy `parents` — NEVER support edges (§5)
+    lineage: list[str]
+    confirmed_by: str | None
+    confirmed_at: float | None
+    created_at: float
+    updated_at: float
+
+
+@dataclass(frozen=True)
+class OccupantRevision:
+    """One entry of a position's occupant history (§1.2).
+
+    Rephrasing never touches the structure; this table is where the wording that
+    was replaced goes, so the position keeps its history without keeping it in
+    the live occupant.
+    """
+
+    id: str
+    workspace_id: str
+    position_id: str
+    revision: int
+    text: str
+    fingerprint: str
+    relation: str
+    foot: str
+    recorded_at: float
+
+
+@dataclass(frozen=True)
+class Suppression:
+    """A locally suppressed Raven memory id (§4).
+
+    Reversible and local: it neither deletes the memory nor mutates Raven's
+    global epistemic state.
+    """
+
+    raven_memory_id: str
+    reason: str
+    workspace_id: str | None
+    created_at: float
+
+
+@dataclass(frozen=True)
+class Dismissal:
+    """A durable workspace-local dismissal by memory id (§4).
+
+    A human-dismissed exposure never resurfaces in that workspace, regardless of
+    future recall scoring.
+    """
+
+    workspace_id: str
+    raven_memory_id: str
+    reason: str
+    created_at: float
 
 
 class Storage:
@@ -448,6 +553,198 @@ class Storage:
                            )"""
                     )
                     tx.execute("PRAGMA user_version = 3")
+                version = 3
+            if version < 4:
+                self._migrate_v4()
+
+    def _migrate_v4(self) -> None:
+        """SPEC §5 — schema v4: the position layer, plus the §4 export gate.
+
+        Additive and conservative.  Existing outbox rows are backfilled to
+        ``human_root`` rather than being invented into frames: a legacy write
+        was a card the old ``_bank_card`` sent unconditionally, and calling it a
+        curated frame would fabricate the human confirmation §5 requires.
+        """
+
+        with self.transaction() as tx:
+            tx.execute(
+                """CREATE TABLE IF NOT EXISTS positions (
+                       workspace_id TEXT NOT NULL REFERENCES workspaces(id)
+                           ON DELETE CASCADE,
+                       position_id TEXT NOT NULL,
+                       floor_kind TEXT NOT NULL DEFAULT 'claim'
+                           CHECK (floor_kind IN ('claim','frame')),
+                       origin TEXT NOT NULL DEFAULT 'human'
+                           CHECK (origin IN
+                               ('human','click','derivation','recall')),
+                       status TEXT NOT NULL DEFAULT 'live'
+                           CHECK (status IN
+                               ('live','folded','vacated','retired')),
+                       folded_under TEXT,
+                       external INTEGER NOT NULL DEFAULT 0
+                           CHECK (external IN (0,1)),
+                       pinned_by_human INTEGER NOT NULL DEFAULT 0
+                           CHECK (pinned_by_human IN (0,1)),
+                       last_grounded_at REAL,
+                       occupant_text TEXT NOT NULL DEFAULT '',
+                       occupant_fingerprint TEXT NOT NULL DEFAULT '',
+                       artifact_type TEXT NOT NULL DEFAULT 'claim',
+                       -- Claims only.  A frame stores NULL in both columns:
+                       -- frame support is computed from the floor (§1.5) and a
+                       -- frame can never carry a receipt at all (§1.1).
+                       support_state TEXT,
+                       receipt TEXT,
+                       provenance_json TEXT NOT NULL DEFAULT '[]',
+                       lineage_json TEXT NOT NULL DEFAULT '[]',
+                       confirmed_by TEXT,
+                       confirmed_at REAL,
+                       created_at REAL NOT NULL,
+                       updated_at REAL NOT NULL,
+                       PRIMARY KEY (workspace_id, position_id),
+                       CHECK (floor_kind <> 'frame'
+                              OR (support_state IS NULL AND receipt IS NULL))
+                   )"""
+            )
+            tx.execute(
+                """CREATE INDEX IF NOT EXISTS positions_workspace_idx
+                   ON positions(workspace_id,status,floor_kind)"""
+            )
+            tx.execute(
+                """CREATE INDEX IF NOT EXISTS positions_stale_idx
+                   ON positions(workspace_id,last_grounded_at)"""
+            )
+            tx.execute(
+                """CREATE INDEX IF NOT EXISTS positions_fingerprint_idx
+                   ON positions(workspace_id,occupant_fingerprint)"""
+            )
+            # Support edges live in their own table so the load-bearing
+            # structure is queryable in both directions.  `provenance` stays a
+            # JSON column on the position: §5 is explicit that legacy `parents`
+            # are NOT support edges, and giving them the same shape here would
+            # invite exactly the confusion the backfill rule forbids.
+            tx.execute(
+                """CREATE TABLE IF NOT EXISTS position_supports (
+                       workspace_id TEXT NOT NULL,
+                       position_id TEXT NOT NULL,
+                       supports_id TEXT NOT NULL,
+                       ordinal INTEGER NOT NULL DEFAULT 0,
+                       PRIMARY KEY (workspace_id, position_id, supports_id),
+                       FOREIGN KEY (workspace_id, position_id)
+                           REFERENCES positions(workspace_id, position_id)
+                           ON DELETE CASCADE
+                   )"""
+            )
+            tx.execute(
+                """CREATE INDEX IF NOT EXISTS position_supports_floor_idx
+                   ON position_supports(workspace_id,supports_id)"""
+            )
+            tx.execute(
+                """CREATE TABLE IF NOT EXISTS occupant_revisions (
+                       id TEXT PRIMARY KEY,
+                       workspace_id TEXT NOT NULL,
+                       position_id TEXT NOT NULL,
+                       revision INTEGER NOT NULL CHECK (revision >= 0),
+                       text TEXT NOT NULL,
+                       fingerprint TEXT NOT NULL DEFAULT '',
+                       relation TEXT NOT NULL DEFAULT 'refinement',
+                       foot TEXT NOT NULL DEFAULT '',
+                       recorded_at REAL NOT NULL,
+                       UNIQUE (workspace_id, position_id, revision)
+                   )"""
+            )
+            tx.execute(
+                """CREATE INDEX IF NOT EXISTS occupant_revisions_position_idx
+                   ON occupant_revisions(workspace_id,position_id,revision)"""
+            )
+            # §2.3 never-retry ledger.  Keyed on position ids so rewording an
+            # occupant can neither resurrect nor silently reopen a settled
+            # non-click.  Retry is `operation_version + 1`, a paper-trailed
+            # human act.
+            tx.execute(
+                """CREATE TABLE IF NOT EXISTS click_attempts (
+                       workspace_id TEXT NOT NULL REFERENCES workspaces(id)
+                           ON DELETE CASCADE,
+                       position_a TEXT NOT NULL,
+                       position_b TEXT NOT NULL,
+                       operation_version INTEGER NOT NULL DEFAULT 1
+                           CHECK (operation_version >= 1),
+                       outcome TEXT NOT NULL
+                           CHECK (outcome IN ('no_click','gate_failed',
+                               'declined','clicked','expired','failed',
+                               'reconsidered')),
+                       detail TEXT NOT NULL DEFAULT '',
+                       attempted_at REAL NOT NULL,
+                       PRIMARY KEY
+                           (workspace_id, position_a, position_b,
+                            operation_version),
+                       CHECK (position_a <= position_b)
+                   )"""
+            )
+            tx.execute(
+                """CREATE INDEX IF NOT EXISTS click_attempts_outcome_idx
+                   ON click_attempts(workspace_id,outcome,attempted_at)"""
+            )
+            tx.execute(
+                """CREATE TABLE IF NOT EXISTS click_candidates (
+                       id TEXT PRIMARY KEY,
+                       workspace_id TEXT NOT NULL REFERENCES workspaces(id)
+                           ON DELETE CASCADE,
+                       position_a TEXT NOT NULL,
+                       position_b TEXT NOT NULL,
+                       abstraction TEXT NOT NULL,
+                       specializer_a TEXT NOT NULL DEFAULT '',
+                       specializer_b TEXT NOT NULL DEFAULT '',
+                       scope_boundary TEXT NOT NULL DEFAULT '',
+                       status TEXT NOT NULL DEFAULT 'open'
+                           CHECK (status IN
+                               ('open','accepted','declined','expired')),
+                       created_at REAL NOT NULL,
+                       resolved_at REAL
+                   )"""
+            )
+            tx.execute(
+                """CREATE INDEX IF NOT EXISTS click_candidates_open_idx
+                   ON click_candidates(workspace_id,status,created_at)"""
+            )
+            # §4 cleanup of existing damage.  Global (workspace_id NULL) or
+            # workspace-scoped, reversible, and never a Raven mutation.
+            tx.execute(
+                """CREATE TABLE IF NOT EXISTS suppression_registry (
+                       raven_memory_id TEXT NOT NULL,
+                       workspace_id TEXT,
+                       reason TEXT NOT NULL DEFAULT '',
+                       created_at REAL NOT NULL,
+                       UNIQUE (raven_memory_id, workspace_id)
+                   )"""
+            )
+            tx.execute(
+                """CREATE INDEX IF NOT EXISTS suppression_memory_idx
+                   ON suppression_registry(raven_memory_id)"""
+            )
+            tx.execute(
+                """CREATE TABLE IF NOT EXISTS dismissals (
+                       workspace_id TEXT NOT NULL REFERENCES workspaces(id)
+                           ON DELETE CASCADE,
+                       raven_memory_id TEXT NOT NULL,
+                       reason TEXT NOT NULL DEFAULT '',
+                       created_at REAL NOT NULL,
+                       PRIMARY KEY (workspace_id, raven_memory_id)
+                   )"""
+            )
+            # §4 — the export gate, as a column rather than a caller condition.
+            columns = {
+                str(row["name"])
+                for row in tx.execute(
+                    "PRAGMA table_info(raven_remember_outbox)"
+                ).fetchall()
+            }
+            if "export_class" not in columns:
+                tx.execute(
+                    """ALTER TABLE raven_remember_outbox
+                       ADD COLUMN export_class TEXT NOT NULL
+                       DEFAULT 'human_root'"""
+                )
+            tx.execute("PRAGMA user_version = 4")
 
     # -- workspaces -----------------------------------------------------
 
@@ -556,6 +853,581 @@ class Storage:
                     raise RuntimeError("workspace context version conflict")
                 raise KeyError(workspace_id)
         return self.load_workspace(workspace_id)
+
+    # -- positions: the durable index (§1.2, §5) ------------------------
+
+    def sync_positions(
+        self, workspace_id: str, snapshot: dict[str, Any]
+    ) -> list[PositionRow]:
+        """Project a snapshot's positions into the index.  One direction only.
+
+        The snapshot is authoritative (§5).  This method never writes back into
+        it and nothing reconstructs an engine from these rows, so the index can
+        never become a second source of truth that drifts from the floor.
+
+        Positions are upserted, never deleted: a position id is durable and
+        never reused (§1.2), and ``vacated``/``retired`` are states the row
+        records rather than reasons to drop it.  ``created_at`` therefore
+        survives every later sync.
+
+        Two derived quantities are refused entry deliberately.  A frame's
+        ``support_state`` and ``receipt`` are forced to NULL regardless of what
+        the snapshot's occupant payload claims — the same structural refusal the
+        engine makes in ``Position.support_state`` (§1.1, §1.5).  A forged
+        supported frame cannot be laundered into the database by way of the
+        index.
+        """
+
+        ts = float(self.now())
+        rows = [
+            row
+            for row in (snapshot.get("positions") or [])
+            if isinstance(row, dict) and str(row.get("id") or "").strip()
+        ]
+        with self.transaction() as db:
+            for row in rows:
+                position_id = str(row["id"]).strip()
+                occupant = dict(row.get("occupant") or {})
+                declared_supports = [
+                    str(value) for value in (row.get("supports") or []) if value
+                ]
+                floor_kind = str(row.get("floor_kind") or "claim")
+                if floor_kind not in FLOOR_KINDS:
+                    floor_kind = "claim"
+                # A position standing on a floor IS a frame — that is what
+                # `altitude(p) = 1 + max(...)` means (§1.2).  Deriving frame-ness
+                # from the edges rather than trusting the declared label closes
+                # the obvious forgery: relabel a frame as a claim and its
+                # occupant's `supported` + receipt would otherwise be stored as
+                # if the floor had never decided anything.  The index must not
+                # be more credulous than the engine.
+                if declared_supports:
+                    floor_kind = "frame"
+                origin = str(row.get("origin") or "human")
+                if origin not in POSITION_ORIGINS:
+                    origin = "human"
+                status = str(row.get("status") or "live")
+                if status not in POSITION_STATUSES:
+                    status = "live"
+                text = str(occupant.get("text") or "")
+                try:
+                    fingerprint = idea_fingerprint(text)
+                except ValueError:
+                    fingerprint = ""
+                # THE FLOOR DECIDES.  A frame's support is computed, so the
+                # index stores nothing it could contradict.
+                if floor_kind == "frame":
+                    support_state = None
+                    receipt = None
+                else:
+                    support_state = str(occupant.get("state") or "open")
+                    receipt = occupant.get("receipt")
+                    receipt = str(receipt) if str(receipt or "").strip() else None
+                artifact_type = str(occupant.get("artifact_type") or "claim")
+                supports = declared_supports
+                db.execute(
+                    """INSERT INTO positions
+                       (workspace_id,position_id,floor_kind,origin,status,
+                        folded_under,external,pinned_by_human,last_grounded_at,
+                        occupant_text,occupant_fingerprint,artifact_type,
+                        support_state,receipt,provenance_json,lineage_json,
+                        confirmed_by,confirmed_at,created_at,updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(workspace_id,position_id) DO UPDATE SET
+                         floor_kind=excluded.floor_kind,
+                         origin=excluded.origin,
+                         status=excluded.status,
+                         folded_under=excluded.folded_under,
+                         external=excluded.external,
+                         pinned_by_human=excluded.pinned_by_human,
+                         last_grounded_at=excluded.last_grounded_at,
+                         occupant_text=excluded.occupant_text,
+                         occupant_fingerprint=excluded.occupant_fingerprint,
+                         artifact_type=excluded.artifact_type,
+                         support_state=excluded.support_state,
+                         receipt=excluded.receipt,
+                         provenance_json=excluded.provenance_json,
+                         lineage_json=excluded.lineage_json,
+                         confirmed_by=excluded.confirmed_by,
+                         confirmed_at=excluded.confirmed_at,
+                         updated_at=excluded.updated_at""",
+                    (
+                        workspace_id, position_id, floor_kind, origin, status,
+                        row.get("folded_under"),
+                        int(bool(row.get("external", False))),
+                        int(bool(row.get("pinned_by_human", False))),
+                        row.get("last_grounded_at"),
+                        text, fingerprint, artifact_type,
+                        support_state, receipt,
+                        _json([str(v) for v in (row.get("provenance") or [])]),
+                        _json([str(v) for v in (row.get("lineage") or [])]),
+                        row.get("confirmed_by"), row.get("confirmed_at"),
+                        ts, ts,
+                    ),
+                )
+                db.execute(
+                    """DELETE FROM position_supports
+                       WHERE workspace_id=? AND position_id=?""",
+                    (workspace_id, position_id),
+                )
+                for ordinal, supports_id in enumerate(supports):
+                    db.execute(
+                        """INSERT OR REPLACE INTO position_supports
+                           (workspace_id,position_id,supports_id,ordinal)
+                           VALUES (?,?,?,?)""",
+                        (workspace_id, position_id, supports_id, ordinal),
+                    )
+                self._sync_occupant_revisions(
+                    db, workspace_id, position_id, row, occupant
+                )
+        return self.list_positions(workspace_id)
+
+    def _sync_occupant_revisions(
+        self,
+        db: sqlite3.Connection,
+        workspace_id: str,
+        position_id: str,
+        row: dict[str, Any],
+        occupant: dict[str, Any],
+    ) -> None:
+        """Append-only occupant history for one position (§1.2).
+
+        The engine caps a card's in-memory ``evolution`` list, so the snapshot
+        eventually forgets the oldest rewordings.  This table does not: it is
+        append-only and keyed by revision ordinal, which is the point of making
+        the position durable in the first place.
+        """
+
+        revisions = [
+            item for item in (row.get("occupant_revisions") or [])
+            if isinstance(item, dict)
+        ]
+        known = {
+            str(r["fingerprint"])
+            for r in db.execute(
+                """SELECT fingerprint FROM occupant_revisions
+                   WHERE workspace_id=? AND position_id=?""",
+                (workspace_id, position_id),
+            ).fetchall()
+        }
+        next_revision = int(
+            db.execute(
+                """SELECT COALESCE(MAX(revision),-1)+1 FROM occupant_revisions
+                   WHERE workspace_id=? AND position_id=?""",
+                (workspace_id, position_id),
+            ).fetchone()[0]
+        )
+        # The wording each revision replaced, then the wording standing now.
+        history = [
+            (str(item.get("from") or ""), "superseded",
+             str(item.get("foot") or ""), float(item.get("ts") or 0.0))
+            for item in revisions
+        ]
+        history.append(
+            (str(occupant.get("text") or ""), "current",
+             str(occupant.get("foot") or ""),
+             float(occupant.get("last_seen") or occupant.get("born") or 0.0))
+        )
+        for text, relation, foot, recorded_at in history:
+            if not str(text).strip():
+                continue
+            try:
+                fingerprint = idea_fingerprint(text)
+            except ValueError:
+                continue
+            if fingerprint in known:
+                continue
+            known.add(fingerprint)
+            db.execute(
+                """INSERT INTO occupant_revisions
+                   (id,workspace_id,position_id,revision,text,fingerprint,
+                    relation,foot,recorded_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (
+                    new_id("rev"), workspace_id, position_id, next_revision,
+                    str(text), fingerprint, relation, foot, recorded_at,
+                ),
+            )
+            next_revision += 1
+
+    def list_positions(
+        self,
+        workspace_id: str,
+        *,
+        floor_kind: str | None = None,
+        status: str | None = None,
+    ) -> list[PositionRow]:
+        conditions = ["workspace_id=?"]
+        params: list[Any] = [workspace_id]
+        if floor_kind is not None:
+            conditions.append("floor_kind=?")
+            params.append(str(floor_kind))
+        if status is not None:
+            conditions.append("status=?")
+            params.append(str(status))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT * FROM positions WHERE {' AND '.join(conditions)}
+                    ORDER BY created_at,position_id""",
+                params,
+            ).fetchall()
+            edges = self._conn.execute(
+                """SELECT position_id,supports_id FROM position_supports
+                   WHERE workspace_id=? ORDER BY position_id,ordinal""",
+                (workspace_id,),
+            ).fetchall()
+        supports: dict[str, list[str]] = {}
+        for edge in edges:
+            supports.setdefault(str(edge["position_id"]), []).append(
+                str(edge["supports_id"])
+            )
+        return [self._position(row, supports.get(str(row["position_id"]), []))
+                for row in rows]
+
+    def get_position(
+        self, workspace_id: str, position_id: str
+    ) -> PositionRow | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM positions WHERE workspace_id=? AND position_id=?",
+                (workspace_id, position_id),
+            ).fetchone()
+            if row is None:
+                return None
+            edges = self._conn.execute(
+                """SELECT supports_id FROM position_supports
+                   WHERE workspace_id=? AND position_id=? ORDER BY ordinal""",
+                (workspace_id, position_id),
+            ).fetchall()
+        return self._position(row, [str(edge["supports_id"]) for edge in edges])
+
+    def find_position_by_fingerprint(
+        self, workspace_id: str, text: str
+    ) -> PositionRow | None:
+        """§4 — adoption-time dedupe onto an existing position.
+
+        The one job position ids cannot do alone (Appendix B #2): a re-adopted
+        memory must land on the position it already occupies rather than minting
+        a fresh one, or it could mint its way around the never-retry ledger.
+        """
+
+        try:
+            fingerprint = idea_fingerprint(text)
+        except ValueError:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT position_id FROM positions
+                   WHERE workspace_id=? AND occupant_fingerprint=?
+                     AND status<>'retired'
+                   ORDER BY created_at,position_id LIMIT 1""",
+                (workspace_id, fingerprint),
+            ).fetchone()
+        if row is None:
+            return None
+        return self.get_position(workspace_id, str(row["position_id"]))
+
+    def list_occupant_revisions(
+        self, workspace_id: str, position_id: str
+    ) -> list[OccupantRevision]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM occupant_revisions
+                   WHERE workspace_id=? AND position_id=?
+                   ORDER BY revision""",
+                (workspace_id, position_id),
+            ).fetchall()
+        return [self._occupant_revision(row) for row in rows]
+
+    def stale_positions(
+        self, workspace_id: str, *, older_than: float
+    ) -> list[PositionRow]:
+        """§1.2/§3.3 — positions whose ground has not been touched recently.
+
+        A never-grounded position is stale by construction, which is why NULL
+        sorts in rather than out: an ungrounded ceiling is exactly what the
+        staleness surface exists to make visible (§7.4).
+        """
+
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT position_id FROM positions
+                   WHERE workspace_id=? AND status IN ('live','folded')
+                     AND (last_grounded_at IS NULL OR last_grounded_at<?)
+                   ORDER BY last_grounded_at IS NOT NULL,last_grounded_at,
+                            position_id""",
+                (workspace_id, float(older_than)),
+            ).fetchall()
+        out = []
+        for row in rows:
+            position = self.get_position(workspace_id, str(row["position_id"]))
+            if position is not None:
+                out.append(position)
+        return out
+
+    # -- click ledger and emergence inbox (§2.3, §2.4) ------------------
+
+    def record_click_attempt(
+        self,
+        workspace_id: str,
+        position_a: str,
+        position_b: str,
+        outcome: str,
+        *,
+        operation_version: int = 1,
+        detail: str = "",
+    ) -> dict[str, Any]:
+        """Write one never-retry row.  Order-independent by construction."""
+
+        a, b = sorted((str(position_a), str(position_b)))
+        ts = float(self.now())
+        with self.transaction() as db:
+            db.execute(
+                """INSERT INTO click_attempts
+                   (workspace_id,position_a,position_b,operation_version,
+                    outcome,detail,attempted_at)
+                   VALUES (?,?,?,?,?,?,?)
+                   ON CONFLICT(workspace_id,position_a,position_b,
+                               operation_version)
+                   DO UPDATE SET outcome=excluded.outcome,
+                                 detail=excluded.detail,
+                                 attempted_at=excluded.attempted_at""",
+                (workspace_id, a, b, int(operation_version), str(outcome),
+                 str(detail), ts),
+            )
+            row = db.execute(
+                """SELECT * FROM click_attempts
+                   WHERE workspace_id=? AND position_a=? AND position_b=?
+                     AND operation_version=?""",
+                (workspace_id, a, b, int(operation_version)),
+            ).fetchone()
+        return dict(row)
+
+    def list_click_attempts(
+        self, workspace_id: str, *, position_a: str | None = None,
+        position_b: str | None = None,
+    ) -> list[dict[str, Any]]:
+        conditions = ["workspace_id=?"]
+        params: list[Any] = [workspace_id]
+        if position_a is not None and position_b is not None:
+            a, b = sorted((str(position_a), str(position_b)))
+            conditions.extend(["position_a=?", "position_b=?"])
+            params.extend([a, b])
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT * FROM click_attempts
+                    WHERE {' AND '.join(conditions)}
+                    ORDER BY attempted_at,operation_version""",
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def sync_click_ledger(
+        self, workspace_id: str, snapshot: dict[str, Any]
+    ) -> None:
+        """Project the engine's attempt ledger and inbox into their indices."""
+
+        with self.transaction() as db:
+            for row in (snapshot.get("click_attempts") or []):
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    a, b = sorted(
+                        (str(row["position_a"]), str(row["position_b"]))
+                    )
+                except (KeyError, TypeError):
+                    continue
+                db.execute(
+                    """INSERT INTO click_attempts
+                       (workspace_id,position_a,position_b,operation_version,
+                        outcome,detail,attempted_at)
+                       VALUES (?,?,?,?,?,?,?)
+                       ON CONFLICT(workspace_id,position_a,position_b,
+                                   operation_version)
+                       DO UPDATE SET outcome=excluded.outcome,
+                                     detail=excluded.detail,
+                                     attempted_at=excluded.attempted_at""",
+                    (
+                        workspace_id, a, b,
+                        int(row.get("operation_version", 1)),
+                        str(row.get("outcome") or "no_click"),
+                        str(row.get("detail") or ""),
+                        float(row.get("attempted_at") or 0.0),
+                    ),
+                )
+            for row in (snapshot.get("click_candidates") or []):
+                if not isinstance(row, dict) or not row.get("id"):
+                    continue
+                status = str(row.get("status") or "open")
+                db.execute(
+                    """INSERT INTO click_candidates
+                       (id,workspace_id,position_a,position_b,abstraction,
+                        specializer_a,specializer_b,scope_boundary,status,
+                        created_at,resolved_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(id) DO UPDATE SET
+                         status=excluded.status,
+                         abstraction=excluded.abstraction,
+                         specializer_a=excluded.specializer_a,
+                         specializer_b=excluded.specializer_b,
+                         scope_boundary=excluded.scope_boundary,
+                         resolved_at=excluded.resolved_at""",
+                    (
+                        str(row["id"]), workspace_id,
+                        str(row.get("position_a") or ""),
+                        str(row.get("position_b") or ""),
+                        str(row.get("abstraction") or ""),
+                        str(row.get("specializer_a") or ""),
+                        str(row.get("specializer_b") or ""),
+                        str(row.get("scope_boundary") or ""),
+                        status,
+                        float(row.get("created_at") or 0.0),
+                        None if status == "open" else float(self.now()),
+                    ),
+                )
+
+    def list_click_candidates(
+        self, workspace_id: str, *, status: str | None = "open"
+    ) -> list[dict[str, Any]]:
+        conditions = ["workspace_id=?"]
+        params: list[Any] = [workspace_id]
+        if status is not None:
+            conditions.append("status=?")
+            params.append(str(status))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT * FROM click_candidates
+                    WHERE {' AND '.join(conditions)} ORDER BY created_at,id""",
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # -- suppression and dismissal (§4) --------------------------------
+
+    def suppress_memory(
+        self,
+        raven_memory_id: str,
+        *,
+        workspace_id: str | None = None,
+        reason: str = "",
+    ) -> Suppression:
+        """Tag a memory id so it stops resurfacing.  Local and reversible."""
+
+        memory_id = str(raven_memory_id or "").strip()
+        if not memory_id:
+            raise ValueError("raven memory id is required")
+        ts = float(self.now())
+        with self.transaction() as db:
+            db.execute(
+                """INSERT INTO suppression_registry
+                   (raven_memory_id,workspace_id,reason,created_at)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(raven_memory_id,workspace_id)
+                   DO UPDATE SET reason=excluded.reason""",
+                (memory_id, workspace_id, str(reason), ts),
+            )
+            row = db.execute(
+                """SELECT * FROM suppression_registry
+                   WHERE raven_memory_id=? AND workspace_id IS ?""",
+                (memory_id, workspace_id),
+            ).fetchone()
+        return self._suppression(row)
+
+    def unsuppress_memory(
+        self, raven_memory_id: str, *, workspace_id: str | None = None
+    ) -> bool:
+        """Reverse a suppression.  The registry is a lens, not a deletion."""
+
+        with self.transaction() as db:
+            cur = db.execute(
+                """DELETE FROM suppression_registry
+                   WHERE raven_memory_id=? AND workspace_id IS ?""",
+                (str(raven_memory_id), workspace_id),
+            )
+        return cur.rowcount > 0
+
+    def is_suppressed(
+        self, raven_memory_id: str, *, workspace_id: str | None = None
+    ) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT 1 FROM suppression_registry
+                   WHERE raven_memory_id=?
+                     AND (workspace_id IS NULL OR workspace_id=?)
+                   LIMIT 1""",
+                (str(raven_memory_id), workspace_id),
+            ).fetchone()
+        return row is not None
+
+    def list_suppressions(
+        self, *, workspace_id: str | None = None
+    ) -> list[Suppression]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM suppression_registry
+                   WHERE workspace_id IS NULL OR workspace_id=?
+                   ORDER BY created_at,raven_memory_id""",
+                (workspace_id,),
+            ).fetchall()
+        return [self._suppression(row) for row in rows]
+
+    def dismiss_memory(
+        self, workspace_id: str, raven_memory_id: str, *, reason: str = ""
+    ) -> Dismissal:
+        """§4 — durable workspace-local dismissal.
+
+        Unlike an exposure row, which recall rewrites on every pass, this is
+        terminal for the workspace: a human-dismissed memory never resurfaces
+        there regardless of future recall scoring.
+        """
+
+        memory_id = str(raven_memory_id or "").strip()
+        if not memory_id:
+            raise ValueError("raven memory id is required")
+        ts = float(self.now())
+        with self.transaction() as db:
+            db.execute(
+                """INSERT INTO dismissals
+                   (workspace_id,raven_memory_id,reason,created_at)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(workspace_id,raven_memory_id)
+                   DO UPDATE SET reason=excluded.reason""",
+                (workspace_id, memory_id, str(reason), ts),
+            )
+            row = db.execute(
+                """SELECT * FROM dismissals
+                   WHERE workspace_id=? AND raven_memory_id=?""",
+                (workspace_id, memory_id),
+            ).fetchone()
+        return self._dismissal(row)
+
+    def is_dismissed(self, workspace_id: str, raven_memory_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT 1 FROM dismissals
+                   WHERE workspace_id=? AND raven_memory_id=? LIMIT 1""",
+                (workspace_id, str(raven_memory_id)),
+            ).fetchone()
+        return row is not None
+
+    def list_dismissals(self, workspace_id: str) -> list[Dismissal]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM dismissals WHERE workspace_id=?
+                   ORDER BY created_at,raven_memory_id""",
+                (workspace_id,),
+            ).fetchall()
+        return [self._dismissal(row) for row in rows]
+
+    def recall_is_blocked(self, workspace_id: str, raven_memory_id: str) -> bool:
+        """One question the recall path asks before showing anything (§4)."""
+
+        memory_id = str(raven_memory_id or "").strip()
+        if not memory_id:
+            return True
+        return self.is_suppressed(
+            memory_id, workspace_id=workspace_id
+        ) or self.is_dismissed(workspace_id, memory_id)
 
     # -- idea bank and occurrences -------------------------------------
 
@@ -938,6 +1810,7 @@ class Storage:
         self,
         content: str,
         *,
+        export_class: str,
         workspace_id: str | None = None,
         source: str | None = None,
         tags: list[str] | None = None,
@@ -948,6 +1821,14 @@ class Storage:
     ) -> RavenRemember:
         """Durably queue one Raven ``remember`` call.
 
+        ``export_class`` is required and must be one of :data:`EXPORT_CLASSES`
+        (§4).  This is the Raven contamination fix at its only chokepoint: the
+        old ``_bank_card`` enqueued a write for *every* card, so machine
+        fusions reached shared memory and were recalled back later.  There is
+        no unclassified write, and therefore no way for a machine candidate, a
+        derived-ungrounded claim, or an unpromoted fold to reach Raven — a
+        caller that cannot name a class is a caller that must not be banking.
+
         ``dedupe_key`` prevents duplicate local enqueue operations. Raven's
         current API does not accept an idempotency key, so delivery is
         at-least-once if a process dies after the remote write but before the
@@ -957,6 +1838,13 @@ class Storage:
         clean_content = str(content or "").strip()
         if not clean_content:
             raise ValueError("remember content is required")
+        export = str(export_class or "").strip()
+        if export not in EXPORT_CLASSES:
+            raise ValueError(
+                "export_class must be one of "
+                f"{', '.join(EXPORT_CLASSES)}; machine-generated material is "
+                "never banked"
+            )
         key = str(dedupe_key or new_id("remember"))
         payload: dict[str, Any] = {"content": clean_content}
         if source is not None:
@@ -973,12 +1861,13 @@ class Storage:
             db.execute(
                 """INSERT INTO raven_remember_outbox
                    (id,workspace_id,dedupe_key,payload_json,status,attempts,
-                    created_at,available_at)
-                   VALUES (?,?,?,?, 'pending',0,?,?)
+                    created_at,available_at,export_class)
+                   VALUES (?,?,?,?, 'pending',0,?,?,?)
                    ON CONFLICT(dedupe_key) DO NOTHING""",
                 (
                     outbox_id, workspace_id, key, _json(payload), ts,
                     ts if available_at is None else float(available_at),
+                    export,
                 ),
             )
             row = db.execute(
@@ -1213,6 +2102,127 @@ class Storage:
                 )
         return self.load_workspace(workspace.id)
 
+    def backfill_positions(self, workspace_id: str) -> dict[str, Any]:
+        """SPEC §5 — the conservative, one-pass-per-workspace backfill.
+
+        The rule this method exists to enforce: **never auto-convert receipted
+        syntheses into folds.**  Combination provenance is not identity
+        recognition, and fabricating ``supports`` edges from legacy ``parents``
+        would seed the ladder with exactly the structure the click gates exist
+        to prevent.  So:
+
+        - Legacy ``parents`` are written as *provenance*, never as ``supports``.
+          The position rows this pass creates have empty support edges even
+          where the old card had two parents.
+        - Legacy ``kind == 'synthesis'`` becomes a provisional annotation and a
+          row in the migration inbox, awaiting human confirmation through the
+          standard gates.  It does **not** become ``floor_kind='frame'``.
+        - Archived parents of receipted syntheses are un-archived to floor 0 —
+          recovering material the old law destroyed — but left unfolded pending
+          that confirmation.
+        - Syntheses without receipts revert to ``needs_human`` claims, floor 0.
+        - Every historical pair, from live *and* archived cards, is written to
+          ``click_attempts`` with ``outcome='no_click'``,
+          ``operation_version=1``: migration itself seeds the never-retry
+          memory.  Historical retries collapse to one row.
+
+        Returns the migration inbox and counters.  It mutates the snapshot's
+        card states only where §5 mandates (un-archiving recovered parents,
+        reverting receiptless syntheses), and is idempotent: a second pass finds
+        the same rows and rewrites them identically.
+        """
+
+        workspace = self.load_workspace(workspace_id)
+        snapshot = dict(workspace.snapshot or {})
+        cards = [
+            dict(card) for card in (snapshot.get("cards") or [])
+            if isinstance(card, dict) and str(card.get("id") or "").strip()
+        ]
+        by_id = {str(card["id"]): card for card in cards}
+        ts = float(self.now())
+
+        pending_frames: list[dict[str, Any]] = []
+        recovered: list[str] = []
+        reverted: list[str] = []
+        pair_rows: set[tuple[str, str]] = set()
+
+        for card in cards:
+            parents = [
+                str(value) for value in (card.get("parents") or []) if value
+            ]
+            # Historical pairs seed the ledger regardless of what became of the
+            # card: memory must be separate from output (§2.3), so an archived
+            # child no longer resurrects its pair.
+            for i, a in enumerate(parents):
+                for b in parents[i + 1:]:
+                    if a != b:
+                        pair_rows.add(tuple(sorted((a, b))))
+            is_synthesis = str(card.get("kind") or "") == "synthesis"
+            if not is_synthesis:
+                continue
+            has_receipt = bool(str(card.get("receipt") or "").strip())
+            if has_receipt and str(card.get("state")) == "supported":
+                pending_frames.append({
+                    "position_id": str(card["id"]),
+                    "text": str(card.get("text") or ""),
+                    "provenance": parents,
+                    "receipt": str(card.get("receipt") or ""),
+                })
+                for parent_id in parents:
+                    parent = by_id.get(parent_id)
+                    if parent is not None and parent.get("archived"):
+                        parent["archived"] = False
+                        recovered.append(parent_id)
+            else:
+                # No receipt, no terminal state.  The law does not bend for
+                # history: what was never grounded reverts to needs_human.
+                if card.get("state") in ("supported", "refuted"):
+                    card["state"] = "needs_human"
+                    card["receipt"] = None
+                    reverted.append(str(card["id"]))
+
+        snapshot["cards"] = cards
+        with self.transaction():
+            self.save_workspace(
+                workspace_id, snapshot, increment_context=False
+            )
+            for a, b in sorted(pair_rows):
+                self.record_click_attempt(
+                    workspace_id, a, b, "no_click",
+                    operation_version=1, detail="migration: historical pair",
+                )
+            with self.transaction() as db:
+                for entry in pending_frames:
+                    db.execute(
+                        """INSERT INTO positions
+                           (workspace_id,position_id,floor_kind,origin,status,
+                            folded_under,external,pinned_by_human,
+                            last_grounded_at,occupant_text,
+                            occupant_fingerprint,artifact_type,support_state,
+                            receipt,provenance_json,lineage_json,confirmed_by,
+                            confirmed_at,created_at,updated_at)
+                           VALUES (?,?,'claim','human','live',NULL,0,0,NULL,?,
+                                   ?,'claim','needs_human',NULL,?,'[]',NULL,
+                                   NULL,?,?)
+                           ON CONFLICT(workspace_id,position_id) DO UPDATE SET
+                             provenance_json=excluded.provenance_json,
+                             updated_at=excluded.updated_at""",
+                        (
+                            workspace_id, entry["position_id"],
+                            entry["text"],
+                            idea_fingerprint(entry["text"])
+                            if entry["text"].strip() else "",
+                            _json(entry["provenance"]), ts, ts,
+                        ),
+                    )
+        return {
+            "workspace_id": workspace_id,
+            "migration_inbox": pending_frames,
+            "recovered_parents": sorted(set(recovered)),
+            "reverted_syntheses": sorted(set(reverted)),
+            "seeded_attempts": len(pair_rows),
+        }
+
     # -- row conversion -------------------------------------------------
 
     @staticmethod
@@ -1289,6 +2299,57 @@ class Storage:
             created_at=row["created_at"], available_at=row["available_at"],
             claimed_at=row["claimed_at"], completed_at=row["completed_at"],
             error=row["error"],
+            export_class=(
+                row["export_class"]
+                if "export_class" in row.keys()
+                else "human_root"
+            ),
+        )
+
+    @staticmethod
+    def _position(row: sqlite3.Row, supports: list[str]) -> PositionRow:
+        return PositionRow(
+            workspace_id=row["workspace_id"], position_id=row["position_id"],
+            floor_kind=row["floor_kind"], origin=row["origin"],
+            status=row["status"], folded_under=row["folded_under"],
+            external=bool(row["external"]),
+            pinned_by_human=bool(row["pinned_by_human"]),
+            last_grounded_at=row["last_grounded_at"],
+            occupant_text=row["occupant_text"],
+            occupant_fingerprint=row["occupant_fingerprint"],
+            artifact_type=row["artifact_type"],
+            support_state=row["support_state"], receipt=row["receipt"],
+            supports=list(supports),
+            provenance=_decode(row["provenance_json"], []),
+            lineage=_decode(row["lineage_json"], []),
+            confirmed_by=row["confirmed_by"], confirmed_at=row["confirmed_at"],
+            created_at=row["created_at"], updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _occupant_revision(row: sqlite3.Row) -> OccupantRevision:
+        return OccupantRevision(
+            id=row["id"], workspace_id=row["workspace_id"],
+            position_id=row["position_id"], revision=row["revision"],
+            text=row["text"], fingerprint=row["fingerprint"],
+            relation=row["relation"], foot=row["foot"],
+            recorded_at=row["recorded_at"],
+        )
+
+    @staticmethod
+    def _suppression(row: sqlite3.Row) -> Suppression:
+        return Suppression(
+            raven_memory_id=row["raven_memory_id"],
+            workspace_id=row["workspace_id"], reason=row["reason"],
+            created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _dismissal(row: sqlite3.Row) -> Dismissal:
+        return Dismissal(
+            workspace_id=row["workspace_id"],
+            raven_memory_id=row["raven_memory_id"], reason=row["reason"],
+            created_at=row["created_at"],
         )
 
     @staticmethod

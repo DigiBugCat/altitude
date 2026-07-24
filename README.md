@@ -1,11 +1,19 @@
-# magpie — a conversation map over memory
+# Altitude — a vertical idea ladder over memory
 
-Magpie is a thematic lens over Raven, not another memory store and not an
-autonomous idea blender. You seed a question or contribute a conversation;
-Magpie preserves the speech act (question, decision, constraint, experiment,
-and so on), groups ideas into themes, and consolidates repetitions into one
-canonical card with occurrence history. The conversation map then shows what
-keeps returning, what remains open, and what the conversation produced.
+Altitude (formerly **Magpie**) is a thematic lens over
+[Raven](https://github.com/DigiBugCat), an epistemological memory system with
+a derivation DAG and confidence scoring. It is not another memory store and
+not an autonomous idea blender. You seed a question or contribute a
+conversation; Altitude preserves the speech act (question, decision,
+constraint, experiment, and so on), groups ideas into themes, and builds a
+ladder of frames over atomic claims. Clicks build the ladder upward
+(recognition that two claims are instances of one frame); derivation fills it
+downward; receipts — evidence events — are the only thing allowed to change
+epistemic state. Nothing settles without a receipt.
+
+The full design is in [`SPEC-ALTITUDE.md`](SPEC-ALTITUDE.md). The codebase is
+mid-migration from the Magpie architecture described below; module names and
+docs still say `magpie` while the Altitude engine work lands.
 
 Connections between ideas remain available as an explicit, secondary action.
 Background pair generation is off by default. Nothing becomes *settled*
