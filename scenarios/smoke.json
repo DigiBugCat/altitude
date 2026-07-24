@@ -1,0 +1,36 @@
+{
+  "name": "offline smoke",
+  "steps": [
+    {
+      "action": "seed",
+      "question": "What makes a local Magpie iteration loop trustworthy?"
+    },
+    {
+      "assert": {
+        "path": "question",
+        "equals": "What makes a local Magpie iteration loop trustworthy?"
+      }
+    },
+    {
+      "action": "propose",
+      "text": "The loop must exercise the public HTTP boundary."
+    },
+    {
+      "wait": {
+        "path": "cards.count",
+        "equals": 1
+      },
+      "timeout": 5
+    },
+    {
+      "action": "keep",
+      "id": "@card:0"
+    },
+    {
+      "assert": {
+        "path": "cards.count",
+        "equals": 1
+      }
+    }
+  ]
+}

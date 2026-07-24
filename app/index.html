@@ -1,0 +1,1065 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>magpie — a metabolism for your thoughts</title>
+<style>
+:root{
+  --ink:#141311; --deep:#1b1914; --field:#211e18; --cream:#f9f4ed; --card-ink:#201e1d;
+  --accent:#f6a06b; --accent-300:#ffc6a5; --accent-700:#8c491a; --accent-900:#3c1f0a;
+  --sage:#aebf92; --sand:#dcd3c4; --settled:#56633f; --quiet:#645c50;
+  --divider:rgba(32,30,29,.12); --lite:rgba(249,244,237,.1);
+}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%}
+body{
+  background:
+    radial-gradient(circle at 42% -12%,rgba(246,160,107,.1),transparent 34rem),
+    var(--ink);
+  color:var(--cream); overflow:hidden;
+  font:14px/1.45 Figtree,-apple-system,"Segoe UI",system-ui,sans-serif;
+  display:flex; flex-direction:column;
+}
+.head{font-family:Caprasimo,Georgia,'Times New Roman',serif; font-weight:400}
+@keyframes pulse{0%,100%{opacity:.3}50%{opacity:1}}
+@keyframes pop{0%{transform:scale(.88);opacity:0}100%{transform:scale(1);opacity:1}}
+@keyframes bob1{0%,100%{transform:translate(0,0)}50%{transform:translate(4px,-5px)}}
+@keyframes bob2{0%,100%{transform:translate(0,0)}50%{transform:translate(-5px,4px)}}
+@keyframes bob3{0%,100%{transform:translate(0,0)}50%{transform:translate(3px,5px)}}
+@keyframes voicepulse{0%,100%{box-shadow:0 0 0 0 rgba(246,160,107,.42)}50%{box-shadow:0 0 0 8px rgba(246,160,107,0)}}
+@media(prefers-reduced-motion:reduce){.card,.pulse{animation:none!important}}
+
+/* top bar */
+#top{
+  height:58px; flex:none; display:flex; align-items:center; gap:16px;
+  padding:0 24px; background:var(--ink);
+}
+#top .mark{font-size:18px}
+#top .div{width:1px;height:20px;background:rgba(249,244,237,.24)}
+#top .q{font-size:14px;font-weight:600;cursor:text;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:34vw}
+#workspacebox{display:none;align-items:center;gap:5px;min-width:0}
+#workspacebox.on{display:flex}
+#workspaces{
+  width:150px;min-width:90px;font:inherit;font-size:11.5px;color:rgba(249,244,237,.78);
+  background:rgba(249,244,237,.08);border:1px solid rgba(249,244,237,.18);
+  border-radius:999px;padding:5px 24px 5px 10px;outline:none;cursor:pointer;
+}
+#workspaces:disabled{opacity:.5;cursor:wait}
+#newworkspace{
+  width:27px;height:27px;flex:none;border-radius:999px;cursor:pointer;
+  border:1px solid rgba(249,244,237,.18);background:transparent;color:rgba(249,244,237,.72);
+  font:18px/1 system-ui,sans-serif;
+}
+#newworkspace:hover{background:rgba(249,244,237,.1);color:var(--cream)}
+#newworkspace:disabled{opacity:.5;cursor:wait}
+#top .cap{font-size:13px;font-weight:600;color:rgba(249,244,237,.7)}
+#top .cap.full{color:var(--accent-300)}
+#top .prov{font-size:11px;letter-spacing:.05em;color:rgba(249,244,237,.42);white-space:nowrap}
+#top .prov.off{color:#ef6a5a}
+#top .phase{display:flex;align-items:center;gap:7px;font-size:13px;opacity:.62}
+#top .dot{width:8px;height:8px;border-radius:999px;background:var(--accent-300);animation:pulse 1.6s ease-in-out infinite}
+#top .dot.off{background:#ef6a5a;animation:none}
+
+#shell{
+  flex:1;min-height:0;display:grid;
+  grid-template-columns:190px minmax(0,1fr) minmax(286px,326px);
+  grid-template-areas:"index field synth";
+}
+
+/* index rail */
+#index{
+  grid-area:index;min-width:0;background:var(--deep);border-right:1px solid var(--lite);
+  display:flex; flex-direction:column;
+}
+#index .rh{flex:none;padding:16px 16px 8px;font-family:Caprasimo,Georgia,serif;font-size:11px;letter-spacing:.12em;color:rgba(249,244,237,.45)}
+#idxlist{flex:1;min-height:0;overflow-y:auto;padding:0 12px 12px;display:flex;flex-direction:column;gap:6px}
+.idx{flex:none;cursor:pointer;border-radius:7px;padding:8px 10px}
+.idx.on{background:rgba(249,244,237,.12)}
+.idx .r1{display:flex;align-items:baseline;gap:6px}
+.idx .pip{width:7px;height:7px;border-radius:999px;flex:none}
+.idx .nm{font-size:11.5px;font-weight:600;color:rgba(249,244,237,.9);line-height:1.3}
+.idx .r2{display:flex;justify-content:space-between;font-size:10px;color:rgba(249,244,237,.5);margin-top:4px}
+.idx .track{height:3px;border-radius:999px;background:rgba(249,244,237,.14);overflow:hidden;margin-top:5px}
+.idx .fill{display:block;height:100%;transition:width .8s ease}
+#idxfoot{flex:none;padding:12px;border-top:1px solid var(--lite);display:flex;flex-direction:column;gap:5px;font-size:10.5px;color:rgba(249,244,237,.5)}
+#idxfoot .kv{display:flex;justify-content:space-between}
+#idxfoot .kv b{font-weight:700}
+#idxfoot button{
+  font:inherit;font-size:10.5px;cursor:pointer;border:1px solid rgba(249,244,237,.22);
+  border-radius:999px;padding:5px 10px;background:transparent;color:rgba(249,244,237,.7);margin-top:4px;
+}
+#idxfoot button:hover{background:rgba(249,244,237,.1)}
+#idxfoot button.dash{border-style:dashed;border-color:rgba(249,244,237,.3)}
+
+/* field */
+#field{
+  grid-area:field;min-width:0;min-height:0;overflow:auto;
+  display:flex;flex-direction:column;gap:12px;padding:16px;
+  background:
+    radial-gradient(circle at 50% 0,rgba(249,244,237,.045),transparent 28rem),
+    var(--field);
+}
+.frow{
+  flex:none;display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
+  gap:12px;min-width:0;align-items:start;
+}
+.sec{
+  min-width:0;min-height:190px;position:relative;overflow:hidden;cursor:pointer;border-radius:16px;
+  padding:48px 14px 32px;display:flex;flex-direction:column;gap:10px;
+  backdrop-filter:blur(12px);
+  transition:opacity .3s ease,box-shadow .3s ease,background .3s ease,transform .25s ease;
+}
+.sec:hover{transform:translateY(-1px)}
+.sec .shead{position:absolute;left:14px;top:13px;right:14px;display:flex;align-items:center;gap:7px}
+.sec .shead input{
+  font-family:Caprasimo,Georgia,serif;font-size:15px;background:transparent;border:0;
+  border-bottom:1px dashed rgba(249,244,237,.18);padding:1px 2px;min-width:0;flex:1;outline:none;
+}
+.sec .shead input:focus{border-bottom-style:solid}
+.sec .smeta{font-size:10px;color:rgba(249,244,237,.45);flex:none}
+.sec .sweight{font-size:10px;font-weight:700;flex:none}
+.sec .quietrow{position:absolute;left:14px;bottom:10px;font-size:10px;color:rgba(249,244,237,.4)}
+.sec .convrow{position:absolute;right:12px;bottom:10px;font-size:10px;letter-spacing:.05em;color:var(--accent-300);background:rgba(20,19,17,.6);border-radius:999px;padding:3px 9px}
+.emptyfield{
+  flex:1;min-height:100px;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:18px;text-align:center;border:1px dashed rgba(249,244,237,.13);border-radius:11px;
+  color:rgba(249,244,237,.44);
+}
+.emptyfield .eicon{
+  width:28px;height:28px;border-radius:999px;display:grid;place-items:center;margin-bottom:8px;
+  background:rgba(249,244,237,.08);color:rgba(249,244,237,.62);font-size:17px;font-weight:300;
+}
+.emptyfield .et{font-size:11px;font-weight:700;color:rgba(249,244,237,.58)}
+.emptyfield .em{font-size:10px;max-width:170px;margin-top:3px}
+.card{
+  flex:none;cursor:pointer;background:var(--cream);color:var(--card-ink);border-radius:7px;
+  padding:9px 11px;transition:margin .6s ease;align-self:stretch;
+  border:1px solid transparent;box-shadow:0 8px 20px rgba(0,0,0,.4);
+}
+.card.inpair{border:2px solid var(--accent-300);box-shadow:0 16px 34px rgba(0,0,0,.55)}
+.card.sel{border:2px solid var(--accent)}
+.card .cr1{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px}
+.card .kick{font-family:Caprasimo,Georgia,serif;font-size:9px;letter-spacing:.11em}
+.card .tag{font-size:9px;font-weight:700;color:#82796a}
+.card .tag.kept{color:var(--accent-700)}
+.card .ctext{font-size:12px;font-weight:600;line-height:1.35}
+.card .cfoot{font-size:9.5px;color:var(--quiet);margin-top:5px}
+
+/* synthesis rail */
+#synth{
+  grid-area:synth;min-width:0;background:var(--cream);color:var(--card-ink);
+  display:flex;flex-direction:column;overflow:hidden;
+}
+#synth .sh{flex:none;padding:16px 16px 12px;border-bottom:1px solid var(--divider)}
+#synth .sh .t{font-family:Caprasimo,Georgia,serif;font-size:15px}
+#synth .sh .m{font-size:12px;color:var(--quiet);margin-top:2px}
+#synthlist{flex:none;max-height:264px;overflow-y:auto;padding:12px 16px;display:flex;flex-direction:column;gap:7px;border-bottom:1px solid var(--divider)}
+.synth{
+  flex:none;cursor:pointer;border-radius:7px;background:#fbe3d3;padding:9px 11px;
+  border-left:3px solid var(--accent);
+}
+.synth .t{font-size:12px;font-weight:600;line-height:1.4}
+.synth .m{font-size:10px;color:var(--accent-700);margin-top:4px}
+#nosynth{font-size:12px;color:#82796a;line-height:1.45}
+#memorywrap{flex:none;padding:11px 16px;border-bottom:1px solid var(--divider)}
+#memoryhead{display:flex;align-items:center;justify-content:space-between;gap:8px}
+#memoryhead .t{font-size:11px;font-weight:800;letter-spacing:.08em;color:var(--quiet)}
+#memoryrecall{
+  font:inherit;font-size:10.5px;font-weight:700;cursor:pointer;border:1px solid var(--divider);
+  border-radius:999px;padding:4px 9px;background:transparent;color:var(--card-ink);
+}
+#memoryrecall:hover{background:#efe8dd}
+#memoryrecall:disabled{opacity:.45;cursor:not-allowed}
+#memorystatus{font-size:10.5px;color:var(--quiet);margin-top:4px}
+#memorylist{display:flex;flex-direction:column;gap:6px;max-height:190px;overflow:auto;margin-top:8px}
+.memory{border-radius:7px;background:#eef0e6;border-left:3px solid var(--sage);padding:8px 9px}
+.memory .t{font-size:11.5px;font-weight:650;line-height:1.35}
+.memory .m{font-size:9.5px;color:var(--quiet);margin-top:4px}
+.memory .a{display:flex;gap:5px;margin-top:6px}
+.memory button{
+  font:inherit;font-size:10px;cursor:pointer;border:1px solid var(--divider);
+  border-radius:999px;padding:3px 8px;background:transparent;color:var(--card-ink);
+}
+.memory button.import{background:var(--sage)}
+#selpanel{flex:none;padding:12px 16px;border-bottom:1px solid var(--divider);display:none;flex-direction:column;gap:8px}
+#selpanel.open{display:flex}
+#selpanel textarea{
+  font:inherit;font-size:12.5px;font-weight:600;line-height:1.4;color:var(--card-ink);
+  background:#efe8dd;border:1px solid var(--divider);border-radius:7px;padding:8px 10px;
+  resize:none;outline:none;width:100%;
+}
+#selpanel textarea:focus{border-color:var(--accent)}
+#selmeta{font-size:11px;color:var(--quiet)}
+#moverow{display:flex;gap:7px;align-items:center;font-size:11px;color:var(--quiet);flex-wrap:wrap}
+#moverow button, .actrow button{
+  font:inherit;font-size:10.5px;cursor:pointer;border:1px solid var(--divider);
+  border-radius:999px;padding:3px 9px;background:transparent;color:var(--card-ink);
+}
+#moverow button:hover{background:#efe8dd}
+.actrow{display:flex;gap:6px;flex-wrap:wrap}
+.actrow button{font-size:11.5px;padding:5px 13px;font-weight:600}
+.actrow button:hover{background:#efe8dd}
+#ledgerwrap{flex:1;min-height:0;padding:12px 16px;display:flex;flex-direction:column;gap:7px}
+#ledgerwrap .lh{flex:none;font-size:11px;font-weight:700;letter-spacing:.08em;color:var(--quiet)}
+#ledger{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:6px}
+.lg{flex:none;border-radius:7px;background:#efe8dd;padding:8px 10px;border-left:3px solid var(--quiet)}
+.lg .k{font-size:10px;font-weight:700;letter-spacing:.08em}
+.lg .t{font-size:11.5px;line-height:1.4;margin-top:3px}
+.lg.offline{background:#f3e2dc;border-left-color:#ef6a5a}
+.lg.offline .k{color:#b23a2c}
+#harvestwrap{flex:none;padding:12px 16px 16px;border-top:1px solid var(--divider)}
+#harvest{
+  width:100%;font:inherit;font-size:12.5px;font-weight:700;cursor:pointer;border:0;
+  border-radius:999px;padding:11px;background:var(--accent);color:var(--accent-900);
+}
+#harvest:hover{filter:brightness(1.05)}
+
+/* entry bar */
+#entry{height:84px;flex:none;background:var(--ink);display:flex;align-items:center;gap:12px;padding:0 24px}
+#entrypill{
+  flex:1;min-width:0;display:flex;align-items:center;gap:12px;
+  background:rgba(249,244,237,.09);border:1px solid rgba(249,244,237,.18);
+  border-radius:999px;padding:12px 16px 12px 24px;
+}
+#entrypill input{
+  flex:1;min-width:0;font:inherit;font-size:15px;color:var(--cream);
+  background:transparent;border:0;outline:none;
+}
+#entrypill input::placeholder{color:rgba(249,244,237,.6)}
+.chip{font-size:11.5px;color:rgba(249,244,237,.45);border:1px solid rgba(249,244,237,.2);border-radius:999px;padding:3px 9px;flex:none;white-space:nowrap}
+#voice{
+  width:52px;height:52px;padding:0;border:0;border-radius:999px;background:var(--accent);
+  color:var(--accent-900);cursor:pointer;display:flex;align-items:center;justify-content:center;flex:none;
+}
+#voice.connecting{background:var(--sand);color:var(--accent-900);animation:voicepulse 1.2s ease-in-out infinite}
+#voice.listening{background:#ef6a5a;color:#fff;animation:voicepulse 1.5s ease-in-out infinite}
+#voice.speaking{background:var(--sage);color:var(--deep)}
+#voice.error{background:#ef6a5a;color:#fff}
+#voice:disabled{cursor:wait;opacity:.82}
+#voicestate{
+  width:104px;flex:none;color:rgba(249,244,237,.72);font-size:11.5px;line-height:1.25;
+}
+#voicestate strong{display:block;color:var(--cream);font-size:12px}
+#voicestate:empty{display:none}
+#voiceapproval{
+  position:fixed;right:24px;bottom:76px;z-index:20;width:min(360px,calc(100vw - 32px));
+  display:none;flex-direction:column;gap:8px;padding:13px 14px;border-radius:10px;
+  color:var(--card-ink);background:var(--cream);border:1px solid var(--divider);
+  box-shadow:0 18px 46px rgba(0,0,0,.52);
+}
+#voiceapproval.open{display:flex}
+#voiceapproval .eyebrow{font-size:9.5px;font-weight:800;letter-spacing:.1em;color:var(--accent-700)}
+#voiceapproval .tool{font-size:13px;font-weight:700}
+#voiceapproval .desc{font-size:11.5px;color:var(--quiet);line-height:1.4}
+#voiceapproval .params{
+  max-height:96px;overflow:auto;padding:7px 8px;border-radius:6px;background:#efe8dd;
+  color:var(--quiet);font:10.5px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;
+}
+#voiceapproval .buttons{display:flex;justify-content:flex-end;gap:7px}
+#voiceapproval button{
+  font:inherit;font-size:11.5px;font-weight:700;cursor:pointer;border-radius:999px;padding:6px 13px;
+  color:var(--card-ink);background:transparent;border:1px solid var(--divider);
+}
+#voiceapproval button.approve{background:var(--accent);border-color:var(--accent);color:var(--accent-900)}
+#voiceapproval button:hover{filter:brightness(1.04)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* Compact desktop / tablet: turn the left rail into a horizontal field tray. */
+@media(max-width:1100px){
+  #top{gap:10px;padding:0 16px}
+  #top .q{max-width:28vw}
+  #top .cap{display:none}
+  #shell{
+    grid-template-columns:minmax(0,1fr) minmax(270px,310px);
+    grid-template-rows:auto minmax(0,1fr);
+    grid-template-areas:"index index" "field synth";
+  }
+  #index{
+    height:86px;border-right:0;border-bottom:1px solid var(--lite);
+    display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:stretch;
+  }
+  #index .rh{padding:14px 10px 0 16px}
+  #idxlist{
+    flex-direction:row;align-items:center;overflow-x:auto;overflow-y:hidden;
+    padding:9px 8px;gap:6px;
+  }
+  .idx{min-width:128px;padding:7px 9px;background:rgba(249,244,237,.035)}
+  #idxfoot{
+    border-top:0;border-left:1px solid var(--lite);padding:10px;
+    justify-content:center;min-width:116px;
+  }
+  #idxfoot .kv{display:none}
+  #idxfoot button{margin:0;padding:4px 9px}
+  #field{padding:12px}
+  .frow{grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+}
+
+/* Narrow view: every surface is reachable in one vertical reading flow. */
+@media(max-width:760px){
+  html,body{height:auto;min-height:100%;overflow-x:hidden}
+  body{overflow-y:auto;display:block;padding-bottom:76px}
+  #top{
+    min-height:58px;height:auto;position:sticky;top:0;z-index:30;
+    flex-wrap:wrap;padding:9px 12px;background:rgba(20,19,17,.96);
+    backdrop-filter:blur(14px);
+  }
+  #top .mark{font-size:16px}
+  #top .div{display:none}
+  #workspacebox{order:2}
+  #workspaces{width:130px}
+  #top .q{order:4;flex-basis:100%;max-width:none;font-size:12px;color:rgba(249,244,237,.72)}
+  #top .prov{margin-left:auto}
+  #top .phase{font-size:11px}
+  #shell{
+    display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto auto;
+    grid-template-areas:"index" "field" "synth";min-height:0;
+  }
+  #index{
+    position:sticky;top:92px;z-index:20;height:72px;
+    grid-template-columns:minmax(0,1fr) auto;background:rgba(27,25,20,.97);
+    backdrop-filter:blur(14px);
+  }
+  #index .rh{display:none}
+  #idxlist{padding:8px}
+  .idx{min-width:118px}
+  #idxfoot{min-width:auto;padding:8px}
+  #idxfoot #clearfocus{display:none}
+  #idxfoot button{font-size:0;width:40px;height:40px;padding:0}
+  #idxfoot button.dash::after{content:"+";font-size:20px}
+  #field{min-height:280px;overflow:visible;padding:10px}
+  .frow{grid-template-columns:minmax(0,1fr);gap:10px}
+  .sec{min-height:170px;padding-top:46px}
+  #synth{width:auto;overflow:visible}
+  #synthlist,#memorylist{max-height:none}
+  #ledgerwrap{min-height:240px;max-height:420px}
+  #entry{
+    position:fixed;left:0;right:0;bottom:0;z-index:35;height:76px;
+    padding:10px 12px;background:rgba(20,19,17,.97);backdrop-filter:blur(14px);
+  }
+  #entrypill{padding:10px 14px}
+  #entrypill input{font-size:14px}
+  .chip,#voicestate{display:none}
+  #voice{width:46px;height:46px}
+  #voiceapproval{right:12px;bottom:84px}
+}
+</style>
+
+<div id="top">
+  <span class="mark head">Magpie</span>
+  <span class="div"></span>
+  <span id="workspacebox">
+    <select id="workspaces" aria-label="Current workspace" title="Switch workspace"></select>
+    <button id="newworkspace" type="button" aria-label="Create a workspace" title="New workspace">+</button>
+  </span>
+  <span class="q" id="question" title="click to set the question">…</span>
+  <span style="flex:1"></span>
+  <span class="prov" id="prov"></span>
+  <span class="cap" id="cap">0 / 12 cards</span>
+  <span class="phase"><span class="dot" id="dot"></span><span id="phase">drifting</span></span>
+</div>
+
+<div id="shell">
+  <div id="index">
+    <div class="rh">FIELDS</div>
+    <div id="idxlist"></div>
+    <div id="idxfoot">
+      <div class="kv"><span>Fusions</span><b id="nmerges">0</b></div>
+      <div class="kv"><span>Archived</span><b id="narchived">0</b></div>
+      <button id="clearfocus">All fields</button>
+      <button id="addsection" class="dash">+ New field</button>
+    </div>
+  </div>
+  <div id="field"></div>
+  <div id="synth">
+    <div class="sh"><div class="t" id="synthtitle">Workspace synthesis</div><div class="m" id="synthmeta">generated as cards drift together</div></div>
+    <div id="synthlist"><div id="nosynth">Emergent theses will appear here as cards drift together.</div></div>
+    <div id="memorywrap">
+      <div id="memoryhead"><div class="t">FROM MEMORY</div><button id="memoryrecall" type="button">Recall</button></div>
+      <div id="memorystatus">Raven is not configured.</div>
+      <div id="memorylist"></div>
+    </div>
+    <div id="selpanel">
+      <textarea id="seltext" rows="3" spellcheck="false" readonly></textarea>
+      <div id="selmeta"></div>
+      <div id="moverow"></div>
+      <div class="actrow">
+        <button id="keepbtn">Keep</button>
+        <button id="yesbtn">Judge yes</button>
+        <button id="nobtn">No</button>
+        <button id="unkbtn">Unknown</button>
+        <button id="killbtn">Kill</button>
+      </div>
+    </div>
+    <div id="ledgerwrap">
+      <div class="lh">WORKSPACE ACTIVITY</div>
+      <div id="ledger"></div>
+    </div>
+    <div id="harvestwrap"><button id="harvest">Harvest workspace</button></div>
+  </div>
+</div>
+
+<div id="entry">
+  <div id="entrypill">
+    <input id="bar" type="text" autocomplete="off" placeholder="Write a thought — Magpie will find its field…">
+    <span class="chip">⌘K commands</span>
+    <span class="chip">keep · kill · judge</span>
+  </div>
+  <div id="voicestate" role="status" aria-live="polite" aria-atomic="true"></div>
+  <button id="voice" type="button" aria-label="Start voice conversation" aria-pressed="false" aria-describedby="voicestate">
+    <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round"><path d="M12 3v10"/><path d="M8 7v4"/><path d="M16 7v4"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg>
+  </button>
+</div>
+
+<div id="voiceapproval" role="alertdialog" aria-modal="false" aria-labelledby="voiceapprovaltool" aria-describedby="voiceapprovaldesc">
+  <div class="eyebrow">VOICE AGENT REQUEST</div>
+  <div class="tool" id="voiceapprovaltool"></div>
+  <div class="desc" id="voiceapprovaldesc"></div>
+  <div class="params" id="voiceapprovalparams"></div>
+  <div class="buttons">
+    <button id="voicereject" type="button">Reject</button>
+    <button id="voiceapprove" class="approve" type="button">Allow once</button>
+  </div>
+</div>
+
+<script>
+'use strict';
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* ---------- palette / mapping ---------- */
+const PALETTE=['#f6a06b','#aebf92','#dcd3c4','#ffc6a5','#ccdbb2','#c9b79c'];
+const KICK_OF={supported:'SETTLED',refuted:'REFUTED',testing:'TESTING',needs_human:'NEEDS YOU',open:'OPEN'};
+const KICK_COLOR={SETTLED:'#56633f',REFUTED:'#8a3a2a',TESTING:'#b2622d','NEEDS YOU':'#8c491a',OPEN:'#645c50',
+  SYNTHESIS:'#8c491a',TENSION:'#8c491a',DISCRIMINATOR:'#8c491a'};
+const LEDGER_COLOR={ARRIVED:'#56633f',FUSING:'#b2622d',FUSED:'#8c491a',RESOLVED:'#56633f',JUDGED:'#645c50',
+  RETIRED:'#645c50',KILLED:'#82796a',MOVED:'#645c50',SECTION:'#645c50',HARVESTED:'#56633f'};
+const LEDGER_LABEL={SECTION:'FIELD'};
+const BOBS=['bob1 9s ease-in-out infinite','bob2 11s ease-in-out infinite','bob3 13s ease-in-out infinite'];
+const hashSeat=id=>{let h=0;for(let i=0;i<String(id).length;i++)h=(h*31+String(id).charCodeAt(i))&0xffff;return h;};
+const rgba=(hex,a)=>{
+  const h=String(hex||'#dcd3c4').replace('#','');
+  const n=parseInt(h.length===3?h.split('').map(c=>c+c).join(''):h,16)||0xdcd3c4;
+  return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${a})`;
+};
+
+/* ---------- client view state (never authoritative) ---------- */
+const V={data:null, sel:null, focus:null, offline:false, lastErr:'', actionErr:'', busy:false, seen:new Set(), born:null,
+  workspaces:[], workspaceControls:false, workspaceBusy:false, workspaceSig:'',
+  pollGeneration:0, pollSequence:0, pollApplied:0};
+const Voice={session:null, starting:false, stopping:false, state:'idle', pendingApproval:null, approvalFocus:null,
+  sdk:null, statusTimer:null, disclosureAccepted:false, generation:0, controller:null};
+const ELEVENLABS_CLIENT_URL='https://esm.sh/@elevenlabs/client@1.11.1?bundle';
+
+/* ---------- api ---------- */
+async function api(path,body){
+  const opt=body===undefined
+    ? {method:'GET'}
+    : {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)};
+  const r=await fetch(path,opt);
+  let j=null;
+  try{ j=await r.json(); }catch(e){ throw new Error('bad response'); }
+  if(!j||j.ok!==true) throw new Error((j&&j.error)||('http '+r.status));
+  return j;
+}
+async function act(path,body){
+  try{
+    const payload={...(body||{})};
+    if(!payload.workspace_id){
+      payload.workspace_id=currentWorkspaceId();
+    }
+    if(!payload.workspace_id)throw new Error('Choose a workspace first');
+    const result=await api(path,payload);
+    V.actionErr='';
+    return result;
+  }catch(e){
+    // A rejected action means the server answered. Connectivity is determined
+    // only by poll(), so validation errors never masquerade as "offline".
+    V.actionErr=String(e.message||e);
+  }finally{
+    await poll();
+  }
+}
+
+/* ---------- ElevenLabs voice agent ---------- */
+function voiceErrorMessage(error){
+  const raw=String((error&&error.message)||error||'Voice session failed');
+  if(/permission|notallowed|denied/i.test(raw)) return 'Microphone permission was denied';
+  if(/notfound|device/i.test(raw)) return 'No microphone is available';
+  return raw.length>90?raw.slice(0,87)+'…':raw;
+}
+
+function setVoiceState(state,detail){
+  Voice.state=state;
+  clearTimeout(Voice.statusTimer);
+  const button=$('#voice'), status=$('#voicestate');
+  button.classList.remove('connecting','listening','speaking','error');
+  if(state!=='idle')button.classList.add(state);
+  const active=state==='connecting'||state==='listening'||state==='speaking';
+  button.setAttribute('aria-pressed',active?'true':'false');
+  button.setAttribute('aria-label',active?'End voice conversation':'Start voice conversation');
+  button.title=active?'End voice conversation':'Start voice conversation';
+  button.disabled=state==='connecting'&&Voice.starting;
+  const labels={
+    idle:'',connecting:'<strong>Connecting…</strong>Getting the microphone',
+    listening:'<strong>Listening</strong>Speak to Magpie',
+    speaking:'<strong>Magpie is speaking</strong>You can interrupt',
+    error:'<strong>Voice unavailable</strong>'+esc(detail||'Try again')
+  };
+  status.innerHTML=labels[state]||'';
+  if(state==='error'){
+    Voice.statusTimer=setTimeout(()=>{
+      if(Voice.state==='error')setVoiceState('idle');
+    },7000);
+  }
+}
+
+function closeVoiceApproval(){
+  Voice.pendingApproval=null;
+  $('#voiceapproval').classList.remove('open');
+  $('#voiceapprovaltool').textContent='';
+  $('#voiceapprovaldesc').textContent='';
+  $('#voiceapprovalparams').textContent='';
+}
+
+function showVoiceApproval(call){
+  Voice.approvalFocus=document.activeElement;
+  Voice.pendingApproval=call;
+  $('#voiceapprovaltool').textContent=call.tool_name||'Use a Magpie tool';
+  const timeout=Number(call.approval_timeout_secs)||0;
+  $('#voiceapprovaldesc').textContent=(call.tool_description||'The voice agent wants to make a change in this workspace.')
+    +(timeout?' Decide within '+timeout+' seconds.':'');
+  const params=call.parameters&&Object.keys(call.parameters).length
+    ?JSON.stringify(call.parameters,null,2):'No parameters';
+  $('#voiceapprovalparams').textContent=params;
+  $('#voiceapproval').classList.add('open');
+  $('#voiceapprove').focus();
+}
+
+function handleMCPToolCall(call){
+  if(!call||!call.tool_call_id)return;
+  if(call.state==='awaiting_approval'){
+    const requestedWorkspace=call.parameters&&call.parameters.workspace_id;
+    if(!requestedWorkspace||requestedWorkspace!==currentWorkspaceId()){
+      if(Voice.session)Voice.session.sendMCPToolApprovalResult(call.tool_call_id,false);
+      return;
+    }
+    if(Voice.pendingApproval&&Voice.pendingApproval.tool_call_id!==call.tool_call_id){
+      if(Voice.session)Voice.session.sendMCPToolApprovalResult(call.tool_call_id,false);
+      return;
+    }
+    showVoiceApproval(call);
+  }else if(Voice.pendingApproval&&Voice.pendingApproval.tool_call_id===call.tool_call_id){
+    closeVoiceApproval();
+  }
+  if(call.state==='success'||call.state==='failure')poll();
+}
+
+async function answerVoiceApproval(approved){
+  const call=Voice.pendingApproval, session=Voice.session;
+  if(!call||!session)return closeVoiceApproval();
+  $('#voiceapprove').disabled=true;
+  $('#voicereject').disabled=true;
+  try{
+    session.sendMCPToolApprovalResult(call.tool_call_id,approved);
+    closeVoiceApproval();
+    if(Voice.approvalFocus&&typeof Voice.approvalFocus.focus==='function')Voice.approvalFocus.focus();
+    Voice.approvalFocus=null;
+  }catch(error){
+    setVoiceState('error',voiceErrorMessage(error));
+  }finally{
+    $('#voiceapprove').disabled=false;
+    $('#voicereject').disabled=false;
+  }
+}
+
+async function fetchVoiceSession(workspaceId,signal){
+  const response=await fetch('/api/voice/session',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({workspace_id:workspaceId}),
+    signal
+  });
+  let payload=null;
+  try{payload=await response.json();}catch(error){/* handled below */}
+  if(!response.ok||!payload||payload.ok!==true){
+    throw new Error((payload&&payload.error)||('Voice session request failed ('+response.status+')'));
+  }
+  const signedUrl=payload.signed_url||payload.signedUrl;
+  if(!signedUrl)throw new Error('Voice session did not include a signed URL');
+  return signedUrl;
+}
+
+async function startVoice(){
+  if(Voice.starting||Voice.session)return;
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+    setVoiceState('error','Voice requires a secure browser with microphone access');
+    return;
+  }
+  if(!Voice.disclosureAccepted){
+    const accepted=window.confirm(
+      'You are about to speak with an AI voice agent. Your audio and transcript may be processed, recorded, and shared with ElevenLabs to provide this conversation. Start voice input?'
+    );
+    if(!accepted)return;
+    Voice.disclosureAccepted=true;
+  }
+  Voice.starting=true;
+  const generation=++Voice.generation;
+  const workspaceId=currentWorkspaceId();
+  const controller=new AbortController();
+  Voice.controller=controller;
+  setVoiceState('connecting');
+  try{
+    // Load the official browser SDK lazily so typed Magpie remains usable if the CDN is unavailable.
+    Voice.sdk=Voice.sdk||await import(ELEVENLABS_CLIENT_URL);
+    if(generation!==Voice.generation)return;
+    const signedUrl=await fetchVoiceSession(workspaceId,controller.signal);
+    if(generation!==Voice.generation||workspaceId!==currentWorkspaceId())return;
+    const session=await Voice.sdk.Conversation.startSession({
+      signedUrl,
+      connectionType:'websocket',
+      dynamicVariables:{workspace_id:workspaceId},
+      onConnect:()=>{
+        if(generation===Voice.generation)setVoiceState('listening');
+      },
+      onDisconnect:details=>{
+        if(generation!==Voice.generation)return;
+        Voice.session=null;
+        closeVoiceApproval();
+        if(Voice.stopping||!details||details.reason==='user')setVoiceState('idle');
+        else if(details.reason==='error')setVoiceState('error',voiceErrorMessage(details.message));
+        else setVoiceState('idle');
+      },
+      onError:message=>{
+        if(generation===Voice.generation)setVoiceState('error',voiceErrorMessage(message));
+      },
+      onStatusChange:({status})=>{
+        if(generation!==Voice.generation)return;
+        if(status==='connecting')setVoiceState('connecting');
+        else if(status==='connected'&&Voice.state==='connecting')setVoiceState('listening');
+      },
+      onModeChange:({mode})=>{
+        if(generation===Voice.generation)setVoiceState(mode==='speaking'?'speaking':'listening');
+      },
+      onMCPToolCall:handleMCPToolCall
+    });
+    if(generation!==Voice.generation||workspaceId!==currentWorkspaceId()){
+      await session.endSession();
+      return;
+    }
+    Voice.session=session;
+    setVoiceState('listening');
+  }catch(error){
+    if(generation!==Voice.generation||error&&error.name==='AbortError')return;
+    Voice.session=null;
+    closeVoiceApproval();
+    setVoiceState('error',voiceErrorMessage(error));
+  }finally{
+    if(generation===Voice.generation){
+      Voice.starting=false;
+      Voice.controller=null;
+      $('#voice').disabled=false;
+    }
+  }
+}
+
+async function stopVoice(){
+  Voice.generation++;
+  if(Voice.controller)Voice.controller.abort();
+  Voice.controller=null;
+  Voice.starting=false;
+  const session=Voice.session;
+  if(!session){setVoiceState('idle');return;}
+  Voice.stopping=true;
+  Voice.session=null;
+  closeVoiceApproval();
+  try{await session.endSession();}
+  catch(error){setVoiceState('error',voiceErrorMessage(error));}
+  finally{
+    Voice.stopping=false;
+    if(Voice.state!=='error')setVoiceState('idle');
+  }
+}
+
+function toggleVoice(){
+  if(Voice.session||Voice.starting)stopVoice();
+  else startVoice();
+}
+
+async function refreshWorkspaces(){
+  try{
+    const j=await api('/api/workspaces');
+    V.workspaces=Array.isArray(j.workspaces)?j.workspaces:[];
+    V.workspaceControls=true;
+  }catch(e){
+    // Older Magpie servers do not expose workspaces; keep the legacy top bar.
+    V.workspaceControls=false;
+  }
+  renderWorkspaceControl();
+}
+
+function currentWorkspaceId(){
+  const ws=V.data&&V.data.workspace;
+  return (ws&&ws.id)||((V.workspaces.find(w=>w&&w.current)||{}).id)||'';
+}
+
+function renderWorkspaceControl(){
+  const box=$('#workspacebox'), select=$('#workspaces'), add=$('#newworkspace');
+  box.classList.toggle('on',V.workspaceControls);
+  if(!V.workspaceControls)return;
+  const current=currentWorkspaceId();
+  const sig=current+'|'+V.workspaces.map(w=>(w.id||'')+':'+(w.name||'')).join('|');
+  if(sig!==V.workspaceSig){
+    select.innerHTML=V.workspaces.map(w=>
+      `<option value="${esc(w.id)}"${w.id===current?' selected':''}>${esc(w.name||'Untitled workspace')}</option>`
+    ).join('');
+    V.workspaceSig=sig;
+  }
+  select.disabled=V.workspaceBusy||!V.workspaces.length;
+  add.disabled=V.workspaceBusy;
+}
+
+async function openWorkspace(id){
+  if(!id||V.workspaceBusy||id===currentWorkspaceId())return;
+  // Voice sessions are bound to the workspace selected when they start.
+  if(Voice.session||Voice.starting)await stopVoice();
+  V.pollGeneration++;
+  V.workspaceBusy=true; renderWorkspaceControl();
+  try{
+    await api('/api/workspaces/open',{id});
+    V.sel=null; V.focus=null;
+    await poll(id);
+    await refreshWorkspaces();
+  }catch(e){
+    V.offline=true; V.lastErr=String(e.message||e);
+  }finally{
+    V.workspaceBusy=false; renderWorkspaceControl();
+  }
+}
+
+async function createWorkspace(){
+  if(V.workspaceBusy)return;
+  const name=prompt('Name the new workspace');
+  if(!name||!name.trim())return;
+  const question=prompt('Starting question (optional)','');
+  if(question===null)return;
+  V.pollGeneration++;
+  V.workspaceBusy=true; renderWorkspaceControl();
+  try{
+    const created=await api('/api/workspaces',{name:name.trim(),question:question.trim()});
+    V.sel=null; V.focus=null;
+    await poll(created&&created.workspace&&created.workspace.id);
+    await refreshWorkspaces();
+  }catch(e){
+    V.offline=true; V.lastErr=String(e.message||e);
+  }finally{
+    V.workspaceBusy=false; renderWorkspaceControl();
+  }
+}
+
+async function poll(workspaceId){
+  const generation=V.pollGeneration, sequence=++V.pollSequence;
+  try{
+    const target=workspaceId||currentWorkspaceId();
+    const j=await api('/api/state'+(target?'?workspace_id='+encodeURIComponent(target):''));
+    if(generation!==V.pollGeneration||sequence<V.pollApplied)return;
+    V.pollApplied=sequence;
+    V.data=j.state||j;               // tolerate either envelope shape
+    if(j.providers&&!V.data.providers) V.data.providers=j.providers;
+    V.offline=false; V.lastErr='';
+  }catch(e){
+    if(generation!==V.pollGeneration||sequence<V.pollApplied)return;
+    V.pollApplied=sequence;
+    V.offline=true; V.lastErr=String(e.message||e);
+  }
+  render();
+}
+
+/* ---------- normalizers (defensive against shape drift) ---------- */
+function cards(){
+  const d=V.data; if(!d) return [];
+  const raw=Array.isArray(d.cards)?d.cards:(d.cards&&typeof d.cards==='object'?Object.values(d.cards):[]);
+  return raw.filter(c=>c && !c.archived && c.state!=='archived');
+}
+function sections(){
+  const d=V.data; if(!d) return [];
+  const raw=d.sections;
+  let list=[];
+  if(Array.isArray(raw)) list=raw.slice();
+  else if(raw&&typeof raw==='object') list=Object.keys(raw).map(k=>Object.assign({key:k},
+    (typeof raw[k]==='object'?raw[k]:{name:raw[k]})));
+  return list.map((s,i)=>{
+    const color=s.color||PALETTE[i%PALETTE.length];
+    return {key:s.key,name:s.name||s.key,color,
+      bg:rgba(color,.09),border:rgba(color,.28),row:i<3?0:1};
+  });
+}
+function ledger(){
+  const l=(V.data&&V.data.ledger)||[];
+  return l.slice().reverse().slice(0,12);
+}
+function weights(secs,cs){
+  const w={};
+  const server=(V.data&&V.data.weights)||null;
+  secs.forEach(s=>{
+    const mine=cs.filter(c=>c.section===s.key);
+    const sv=server&&server[s.key];
+    w[s.key]={mass:sv?Number(sv.mass)||0:mine.reduce((t,c)=>t+(Number(c.mass)||0),0),
+              count:sv&&sv.count!=null?sv.count:mine.length, norm:0};
+  });
+  const max=Math.max(1e-9,...secs.map(s=>w[s.key].mass));
+  secs.forEach(s=>{w[s.key].norm=Math.min(1,w[s.key].mass/max);});
+  return w;
+}
+function kickOf(c){
+  if(c.kind==='synthesis'){
+    const f=String(c.foot||'')+' '+String(c.receipt||'');
+    const m=f.match(/TENSION|DISCRIMINATOR|SYNTHESIS/i);
+    return m?m[0].toUpperCase():'SYNTHESIS';
+  }
+  return KICK_OF[c.state]||'OPEN';
+}
+
+/* ---------- render ---------- */
+function render(){
+  const d=V.data;
+  const secs=sections(), cs=cards(), W=weights(secs,cs);
+  const cap=(d&&(d.capacity||d.cap))||12;
+  const pairIds=cs.filter(c=>c.state==='testing').map(c=>c.id);
+
+  // top bar
+  renderWorkspaceControl();
+  $('#question').textContent=(d&&d.question)?d.question:'Click to set the question…';
+  $('#cap').textContent=cs.length+' / '+cap+' cards';
+  $('#cap').classList.toggle('full',cs.length>=cap);
+  const converging=pairIds.length>0;
+  $('#phase').textContent=V.offline?'field offline':(converging?'two are converging':'drifting');
+  $('#dot').classList.toggle('off',V.offline);
+
+  const provs=(d&&d.providers)||[];
+  const answering=provs.find(p=>p&&(p.answering||p.last))||provs.find(p=>p&&p.available!==false)||provs[0];
+  const rawProvider=answering?(answering.name||answering.provider||String(answering)):'';
+  const pname=/^stub$/i.test(rawProvider)?'local demo':rawProvider;
+  $('#prov').textContent=V.offline?'server unreachable':(pname?('via '+pname):'inference unavailable');
+  $('#prov').classList.toggle('off',V.offline);
+
+  // counters
+  const led=(d&&d.ledger)||[];
+  $('#nmerges').textContent=led.filter(l=>l.kind==='FUSED').length;
+  $('#narchived').textContent=led.filter(l=>l.kind==='RETIRED'||l.kind==='KILLED').length;
+
+  $('#bar').placeholder=converging
+    ?'Two cards are being pulled together — keep one apart if you disagree…'
+    :'Write a thought — Magpie will find its field…';
+
+  // index rail
+  const idx=secs.map(s=>({s,w:W[s.key]})).sort((a,b)=>b.w.mass-a.w.mass);
+  $('#idxlist').innerHTML=idx.map(({s,w})=>`
+    <div class="idx${V.focus===s.key?' on':''}" data-k="${esc(s.key)}">
+      <div class="r1"><span class="pip" style="background:${esc(s.color)}"></span><span class="nm">${esc(s.name)}</span></div>
+      <div class="r2"><span>${w.count} cards</span><span>${w.mass.toFixed(2)}</span></div>
+      <div class="track"><span class="fill" style="background:${esc(s.color)};width:${Math.round(w.norm*100)}%"></span></div>
+    </div>`).join('');
+  document.querySelectorAll('.idx').forEach(el=>el.onclick=()=>{V.focus=el.dataset.k;render();});
+
+  // field
+  const visibleSecs=V.focus?secs.filter(s=>s.key===V.focus):secs;
+  const rows=V.focus
+    ?[visibleSecs]
+    :[visibleSecs.filter(s=>s.row===0),visibleSecs.filter(s=>s.row===1)].filter(r=>r.length);
+  $('#field').innerHTML=rows.map((row,ri)=>`<div class="frow" style="flex:${ri===0&&rows.length>1?1.25:1}">${
+    row.map(s=>{
+      const w=W[s.key], isFocus=V.focus===s.key;
+      const list=cs.filter(c=>c.section===s.key).sort((a,b)=>(b.mass||0)-(a.mass||0));
+      const shown=V.focus?list:list.slice(0,3);
+      const conv=list.filter(c=>pairIds.includes(c.id)).length;
+      return `<div class="sec" data-k="${esc(s.key)}" style="background:${s.bg};flex:${(0.4+w.norm*1.5).toFixed(2)};
+        border:${isFocus?'2px solid '+esc(s.color):'1px solid '+s.border};
+        box-shadow:${isFocus?'0 0 0 3px rgba(246,160,107,.18) inset':'none'};
+        opacity:${V.focus&&!isFocus?.38:1}">
+        <div class="shead">
+          <input value="${esc(s.name)}" data-k="${esc(s.key)}" data-original="${esc(s.name)}"
+            aria-label="Field name" spellcheck="false" style="color:${esc(s.color)}">
+          <span class="smeta">· ${w.count} ${w.count===1?'card':'cards'}</span>
+          <span class="sweight" style="color:${esc(s.color)}">${w.mass.toFixed(2)}</span>
+        </div>
+        ${shown.map((c,k)=>{
+          const inPair=pairIds.includes(c.id), drawn=inPair;
+          const kick=kickOf(c);
+          const fresh=(c.id===V.born);
+          return `<div class="card${inPair?' inpair':''}${c.id===V.sel?' sel':''}" data-id="${esc(c.id)}"
+            style="margin-left:${drawn?4:(k%2)*14}px;margin-right:${drawn?4:(k%2)?0:14}px;
+            animation:${fresh?'pop .5s ease':BOBS[hashSeat(c.id)%3]}">
+            <div class="cr1"><span class="kick" style="color:${KICK_COLOR[kick]||'#645c50'}">${esc(kick)}</span>
+            <span class="tag${c.pinned?' kept':''}">${c.pinned?'KEPT':(Number(c.mass)||0).toFixed(2)}</span></div>
+            <div class="ctext">${esc(c.text)}</div>
+            <div class="cfoot">${esc(c.receipt||c.foot||'')}</div>
+          </div>`;}).join('')}
+        ${list.length===0?`<div class="emptyfield">
+          <div class="eicon">+</div>
+          <div class="et">No cards here yet</div>
+          <div class="em">Add a thought below or bring in something from memory.</div>
+        </div>`:''}
+        ${list.length>shown.length?`<div class="quietrow">+ ${list.length-shown.length} held under</div>`:''}
+        ${conv?`<div class="convrow">${conv===2?'two of these are fusing':'one is being pulled out'}</div>`:''}
+      </div>`;
+    }).join('')}</div>`).join('');
+
+  document.querySelectorAll('.sec').forEach(el=>el.onclick=e=>{
+    if(e.target.tagName==='INPUT')return;
+    const k=el.dataset.k; V.focus=V.focus===k?null:k; render();
+  });
+  document.querySelectorAll('.shead input').forEach(input=>{
+    input.onkeydown=e=>{
+      if(e.key==='Enter'){e.preventDefault();input.blur();}
+      if(e.key==='Escape'){input.value=input.dataset.original;input.blur();}
+    };
+    input.onblur=()=>{
+      const name=input.value.trim();
+      if(!name||name===input.dataset.original){
+        input.value=input.dataset.original;
+        return;
+      }
+      act('/api/section/rename',{key:input.dataset.k,name});
+    };
+  });
+  document.querySelectorAll('.card').forEach(el=>el.onclick=e=>{
+    e.stopPropagation(); V.sel=el.dataset.id; render();
+  });
+
+  // synthesis rail
+  const syn=cs.filter(c=>c.kind==='synthesis'&&(!V.focus||c.section===V.focus))
+    .sort((a,b)=>(b.born||0)-(a.born||0)).slice(0,6);
+  $('#synthtitle').textContent=V.focus?'Field synthesis':'Workspace synthesis';
+  $('#synthmeta').textContent=syn.length?syn.length+' emergent theses · newest first':'generated as cards drift together';
+  $('#synthlist').innerHTML=syn.length
+    ? syn.map(t=>`<div class="synth" data-id="${esc(t.id)}"><div class="t">${esc(t.text)}</div><div class="m">${esc(t.receipt||t.foot||'')}</div></div>`).join('')
+    : '<div id="nosynth">Emergent theses will appear here as cards drift together.</div>';
+  document.querySelectorAll('.synth').forEach(el=>el.onclick=()=>{V.sel=el.dataset.id;render();});
+
+  // Raven stays private behind Magpie. These are workspace-local suggestions,
+  // and importing one always creates an ordinary open card.
+  const memory=(d&&d.memory_shelf)||{};
+  const suggestions=Array.isArray(memory.suggestions)?memory.suggestions:[];
+  $('#memoryrecall').disabled=!memory.enabled;
+  $('#memorystatus').textContent=!memory.enabled
+    ?'Raven is not configured.'
+    :(memory.status==='unavailable'
+      ?('Raven unavailable'+(memory.error?' — '+memory.error:''))
+      :(suggestions.length
+        ?suggestions.length+' relevant '+(suggestions.length===1?'memory':'memories')
+        :'Recall against this workspace question.'));
+  $('#memorylist').innerHTML=suggestions.map(item=>{
+    const m=item.memory||{};
+    const confidence=Number(m.effective_confidence);
+    const meta=[m.kind,m.state,Number.isFinite(confidence)?confidence.toFixed(2):''].filter(Boolean).join(' · ');
+    return `<div class="memory" data-memory-id="${esc(item.memory_id)}">
+      <div class="t">${esc(m.content||'Untitled memory')}</div>
+      <div class="m">${esc(meta)}</div>
+      <div class="a"><button class="import" data-action="adopt">${V.focus?'Bring into this field':'Bring into workspace'}</button>
+      <button data-action="dismiss">Not here</button></div>
+    </div>`;
+  }).join('');
+  document.querySelectorAll('.memory button').forEach(button=>button.onclick=()=>{
+    const row=button.closest('.memory');
+    const memoryId=row&&row.dataset.memoryId;
+    if(!memoryId)return;
+    if(button.dataset.action==='adopt'){
+      act('/api/recall/adopt',{
+        workspace_id:currentWorkspaceId(),
+        memory_id:memoryId,
+        section:V.focus||undefined
+      });
+    }else{
+      act('/api/recall/dismiss',{workspace_id:currentWorkspaceId(),memory_id:memoryId});
+    }
+  });
+
+  // selection panel
+  const sel=cs.find(c=>c.id===V.sel);
+  $('#selpanel').classList.toggle('open',!!sel);
+  if(sel){
+    if(document.activeElement!==$('#seltext')) $('#seltext').value=sel.text||'';
+    $('#selmeta').textContent=kickOf(sel)+' · mass '+(Number(sel.mass)||0).toFixed(2)
+      +' · '+(sel.receipt||sel.foot||'no receipt yet');
+    $('#keepbtn').textContent=sel.pinned?'Release':'Keep';
+    $('#moverow').innerHTML='<span>Move to field</span>'+secs.filter(s=>s.key!==sel.section)
+      .map(s=>`<button data-k="${esc(s.key)}">${esc(s.name)}</button>`).join('');
+    document.querySelectorAll('#moverow button').forEach(b=>b.onclick=()=>{
+      act('/api/move',{id:sel.id,section:b.dataset.k});
+    });
+  }
+
+  // ledger (+ offline note)
+  const rows2=ledger().map(l=>{
+    const label=LEDGER_LABEL[l.kind]||l.kind;
+    const text=l.kind==='SECTION'?String(l.text||'').replace(/^section\b/i,'field'):l.text;
+    return `
+    <div class="lg" style="border-left-color:${LEDGER_COLOR[l.kind]||'#645c50'}">
+      <div class="k" style="color:${LEDGER_COLOR[l.kind]||'#645c50'}">${esc(label)}</div>
+      <div class="t">${esc(text)}</div>
+    </div>`;
+  }).join('');
+  const offRow=V.offline?`<div class="lg offline"><div class="k">SERVER UNREACHABLE</div>
+      <div class="t">Magpie is reconnecting${V.lastErr?' — '+esc(V.lastErr):''}.</div></div>`:'';
+  const actionRow=V.actionErr?`<div class="lg offline"><div class="k">ACTION NOT APPLIED</div>
+      <div class="t">${esc(V.actionErr)}</div></div>`:'';
+  $('#ledger').innerHTML=offRow+actionRow+rows2;
+}
+
+/* ---------- wiring ---------- */
+$('#workspaces').onchange=e=>openWorkspace(e.target.value);
+$('#newworkspace').onclick=createWorkspace;
+$('#clearfocus').onclick=()=>{V.focus=null;render();};
+$('#addsection').onclick=async()=>{
+  const name=prompt('Name the field');
+  if(!name||!name.trim())return;
+  const result=await act('/api/section',{
+    name:name.trim(),
+    color:PALETTE[sections().length%PALETTE.length]
+  });
+  if(result&&result.key){V.focus=result.key;render();}
+};
+$('#question').onclick=()=>{
+  const q=prompt('What is the question?',(V.data&&V.data.question)||'');
+  if(q&&q.trim()) act('/api/seed',{question:q.trim()});
+};
+$('#keepbtn').onclick=()=>{ if(V.sel) act('/api/keep',{id:V.sel}); };
+$('#yesbtn').onclick=()=>{ if(V.sel) act('/api/judge',{id:V.sel,verdict:'yes'}); };
+$('#nobtn').onclick=()=>{ if(V.sel) act('/api/judge',{id:V.sel,verdict:'no'}); };
+$('#unkbtn').onclick=()=>{ if(V.sel) act('/api/judge',{id:V.sel,verdict:'unknown'}); };
+$('#killbtn').onclick=()=>{ if(!V.sel)return; const id=V.sel; V.sel=null; act('/api/kill',{id}); };
+$('#harvest').onclick=()=>act('/api/harvest',{});
+$('#memoryrecall').onclick=async()=>{
+  const question=(V.data&&V.data.question)||'';
+  const query=prompt('What should Raven recall for this workspace?',question);
+  if(query===null||!query.trim())return;
+  $('#memoryrecall').disabled=true;
+  await act('/api/recall',{
+    workspace_id:currentWorkspaceId(),
+    query:query.trim(),
+    limit:10
+  });
+};
+$('#bar').addEventListener('keydown',e=>{
+  if(e.key!=='Enter')return;
+  const t=e.target.value.trim(); if(!t)return;
+  e.target.value='';
+  act('/api/propose',{text:t});
+});
+$('#bar').addEventListener('input',()=>{
+  if(Voice.session&&typeof Voice.session.sendUserActivity==='function')Voice.session.sendUserActivity();
+});
+$('#voice').onclick=toggleVoice;
+$('#voiceapprove').onclick=()=>answerVoiceApproval(true);
+$('#voicereject').onclick=()=>answerVoiceApproval(false);
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){
+    if(Voice.pendingApproval)answerVoiceApproval(false);
+    else{V.sel=null;render();}
+  }
+});
+window.addEventListener('pagehide',()=>{if(Voice.session)Voice.session.endSession();});
+
+render();
+Promise.all([poll(),refreshWorkspaces()]);
+setInterval(poll,1000);
+</script>

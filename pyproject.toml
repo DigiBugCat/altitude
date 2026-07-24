@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aviary-magpie"
+version = "0.1.0"
+description = "A persistent thought field with browser, JSON, and MCP interfaces."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aviary-mcp==0.1.0rc6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+magpie = "magpie.cli:main"
+magpie-server = "magpie.server:main"
+
+[tool.setuptools.packages.find]
+include = ["magpie*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
